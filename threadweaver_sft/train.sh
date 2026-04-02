@@ -10,26 +10,30 @@ max_steps=-1
 push_to_hub=false
 OUTPUT_DIR=${OUTPUT_DIR:-"ckpts/Q3-8B-131072-SFT-${uid}"}
 TRAIN_DATA="${TRAIN_DATA:-./data/mult-10k-par}"
+extra_args=()
 
 usage() {
     cat <<EOF
 Usage: $0 [options] [extra_args_for_sft_threadweaver.py]
 
 Options:
-  --base_model <path>   Base model path (default: \$BASE_MODEL or /storage/openpis/models/Qwen__Qwen3-8B)
+  --original_model_path <path>  Original/base model path
+  --base_model <path>           Alias of --original_model_path
   --output_dir <path>   Output directory (default: \$OUTPUT_DIR or ckpts/Q3-8B-131072-SFT-<timestamp>)
-  --dataset_dir <path>  Dataset directory (default: \$TRAIN_DATA or ./data/mult-10k-par)
+  --dataset_dir <path>  Dataset path (used exactly as provided, can be a parquet file path)
+  --dataset_path <path> Alias of --dataset_dir
+  --train_data <path>   Alias of --dataset_dir
   -h, --help            Show this help message
 
 Examples:
-  bash train.sh --base_model /models/Qwen3-8B --output_dir ckpts/run1 --dataset_dir ./data/my_dataset
+  bash train.sh --original_model_path /models/Qwen3-8B --output_dir ckpts/run1 --dataset_dir /path/to/train.parquet
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --base_model)
-            [ -n "$2" ] || { echo "Error: --base_model requires a value."; exit 1; }
+        --original_model_path|--base_model|--model_name)
+            [ -n "$2" ] || { echo "Error: $1 requires a value."; exit 1; }
             base_model="$2"
             shift 2
             ;;
@@ -38,8 +42,8 @@ while [ $# -gt 0 ]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
-        --dataset_dir|--train_data)
-            [ -n "$2" ] || { echo "Error: --dataset_dir requires a value."; exit 1; }
+        --dataset_dir|--dataset_path|--train_data)
+            [ -n "$2" ] || { echo "Error: $1 requires a value."; exit 1; }
             TRAIN_DATA="$2"
             shift 2
             ;;
@@ -48,7 +52,8 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         *)
-            break
+            extra_args+=("$1")
+            shift
             ;;
     esac
 done
@@ -84,4 +89,4 @@ torchrun --nproc-per-node gpu --master_port 12345 \
     --attn_implementation="flex_attention" \
     --template_name="qwen" \
     --report_to="wandb" \
-    "$@"
+    "${extra_args[@]}"
