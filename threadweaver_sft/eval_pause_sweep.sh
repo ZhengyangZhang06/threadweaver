@@ -2,8 +2,8 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <checkpoint_path> [--data-type|-d <data_path>] [extra args for simple_eval_pause.py]"
-  echo "Example: $0 ckpts/Q3-8B-131072-SFT --data-type data/mult-10k-par_pq/train.parquet --bfloat16 --verbose 2 -n 1"
+  echo "Usage: $0 <checkpoint_path> [--data-type|-d <data_path>] [-n|--n-samples <num>] [--bfloat16] [--verbose <level>] [extra args for simple_eval_pause.py]"
+  echo "Example: $0 ckpts/Q3-8B-131072-SFT --data-type data/mult-10k-par_pq/train.parquet --bfloat16 --verbose 2 -n 32"
 }
 
 if [[ $# -lt 1 ]]; then
@@ -15,6 +15,9 @@ CHECKPOINT_PATH="$1"
 shift
 
 DATA_TYPE_FROM_CLI=""
+N_SAMPLES_FROM_CLI=""
+VERBOSE_FROM_CLI=""
+USE_BFLOAT16=false
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,6 +29,28 @@ while [[ $# -gt 0 ]]; do
       fi
       DATA_TYPE_FROM_CLI="$2"
       shift 2
+      ;;
+    -n|--n-samples)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: $1 requires a value."
+        usage
+        exit 1
+      fi
+      N_SAMPLES_FROM_CLI="$2"
+      shift 2
+      ;;
+    --verbose)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: $1 requires a value."
+        usage
+        exit 1
+      fi
+      VERBOSE_FROM_CLI="$2"
+      shift 2
+      ;;
+    --bfloat16)
+      USE_BFLOAT16=true
+      shift
       ;;
     --help|-h)
       usage
@@ -55,20 +80,24 @@ if [[ -z "${DATA_TYPE}" ]]; then
   echo "Error: --data-type is required."
   exit 1
 fi
-N_SAMPLES="${N_SAMPLES:-1}"
+N_SAMPLES="${N_SAMPLES_FROM_CLI:-${N_SAMPLES:-1}}"
 MAX_CONTEXT_LENGTH="${MAX_CONTEXT_LENGTH:-40960}"
 TEMPLATE_TYPE="${TEMPLATE_TYPE:-model}"
+VERBOSE_LEVEL="${VERBOSE_FROM_CLI:-${VERBOSE_LEVEL:-}}"
 
 echo "Running pause sweep for checkpoint: ${CHECKPOINT_PATH}"
 echo "Token limits: ${TOKEN_LIMITS[*]}"
-echo "Data: ${DATA_TYPE}, n_samples: ${N_SAMPLES}, max_context_length: ${MAX_CONTEXT_LENGTH}"
+echo "Data: ${DATA_TYPE}, n_samples: ${N_SAMPLES}, max_context_length: ${MAX_CONTEXT_LENGTH}, bfloat16: ${USE_BFLOAT16}"
+if [[ -n "${VERBOSE_LEVEL}" ]]; then
+  echo "Verbose: ${VERBOSE_LEVEL}"
+fi
 echo
 
 for limit in "${TOKEN_LIMITS[@]}"; do
   echo "=============================="
   echo "Evaluating pause token limit: ${limit}"
   echo "=============================="
-  python "${EVAL_SCRIPT}" \
+  CMD=(python "${EVAL_SCRIPT}" \
     --model_name "${CHECKPOINT_PATH}" \
     --data-type "${DATA_TYPE}" \
     --template-type "${TEMPLATE_TYPE}" \
@@ -76,8 +105,15 @@ for limit in "${TOKEN_LIMITS[@]}"; do
     --branching-generate \
     --max-context-length "${MAX_CONTEXT_LENGTH}" \
     -n "${N_SAMPLES}" \
-    --pause-at-longest-thread-tokens "${limit}" \
-    "${EXTRA_ARGS[@]}"
+    --pause-at-longest-thread-tokens "${limit}")
+  if [[ "${USE_BFLOAT16}" == "true" ]]; then
+    CMD+=(--bfloat16)
+  fi
+  if [[ -n "${VERBOSE_LEVEL}" ]]; then
+    CMD+=(--verbose "${VERBOSE_LEVEL}")
+  fi
+  CMD+=("${EXTRA_ARGS[@]}")
+  "${CMD[@]}"
 done
 
 python - "${CHECKPOINT_PATH}" <<'PY'

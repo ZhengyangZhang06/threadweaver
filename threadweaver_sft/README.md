@@ -73,13 +73,13 @@ Pass@1: 0.9377 (93.77)
 To evaluate one checkpoint across multiple `num_tokens_in_the_longest_thread` pause limits and generate a summary report:
 
 ```bash
-./eval_pause_sweep.sh <checkpoint_path> --data-type <data_path> [extra args for simple_eval_pause.py]
+./eval_pause_sweep.sh <checkpoint_path> --data-type <data_path> [-n <num>] [--bfloat16] [--verbose <level>] [extra args for simple_eval_pause.py]
 ```
 
 Example:
 
 ```bash
-./eval_pause_sweep.sh ckpts/Q3-8B-131072-SFT --data-type data/mult-10k-par_pq/train.parquet --bfloat16 --verbose 2
+./eval_pause_sweep.sh ckpts/Q3-8B-131072-SFT --data-type data/mult-10k-par_pq/train.parquet -n 32 --bfloat16 --verbose 2
 ```
 
 Data path resolution order:
@@ -88,9 +88,10 @@ Data path resolution order:
 - interactive terminal prompt if neither is provided
 
 Other optional environment overrides:
-- `N_SAMPLES` (default: `1`)
+- `N_SAMPLES` (default: `1`, can be overridden by `-n` / `--n-samples`)
 - `MAX_CONTEXT_LENGTH` (default: `40960`)
 - `TEMPLATE_TYPE` (default: `model`)
+- `VERBOSE_LEVEL` (used if `--verbose` is not provided)
 
 This runs `src/simple_eval_pause.py` at pause limits:
 `4096, 8192, 16384, 24576, 32768, 40960`.
