@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import time
+import warnings
 from typing import List, Union
 
 import numpy as np
@@ -349,10 +350,14 @@ planning_end_tags = ["</Outlines>"]
 planning_start_tags = ["<Outlines>"]
 outline_number_pattern = re.compile(r"<(?:Outline|Trial|Subtask)>\s*([0-9]+(?:\.[0-9]+)*)\s*:")
 thread_end_id = tokenizer.convert_tokens_to_ids(thread_end)
-if thread_end_id is None or thread_end_id == tokenizer.unk_token_id:
-    raise ValueError(
+thread_end_is_single_token = (
+    thread_end_id is not None and thread_end_id != tokenizer.unk_token_id
+)
+if not thread_end_is_single_token:
+    warnings.warn(
         f"{thread_end} is not configured as a single tokenizer token. "
-        "Please add thread tags as special tokens before evaluation."
+        "Falling back to sequential generation without thread-end stop token.",
+        RuntimeWarning,
     )
 planning_end_ids = [
     token_id
@@ -360,14 +365,34 @@ planning_end_ids = [
     if token_id is not None and token_id != tokenizer.unk_token_id
 ]
 if not planning_end_ids:
-    raise ValueError(
-        f"Neither {planning_end_tags} is configured as a single tokenizer token. "
-        "Please add planning tags as special tokens before evaluation."
+    warnings.warn(
+        f"{planning_end_tags} are not configured as single tokenizer tokens. "
+        "Falling back to sequential generation without planning-end stop tokens.",
+        RuntimeWarning,
     )
 eos_id = tokenizer.eos_token_id
 
-# Get special token IDs for parallel stats computation
-special_token_ids = get_special_token_ids(tokenizer)
+special_token_ids = None
+parallel_stats_available = False
+try:
+    # Get special token IDs for parallel stats computation
+    special_token_ids = get_special_token_ids(tokenizer)
+    parallel_stats_available = True
+except ValueError as e:
+    warnings.warn(
+        f"Some required parallel special tokens are missing or not single-token: {e}. "
+        "Continuing with sequential-compatible stats (no parallel parsing).",
+        RuntimeWarning,
+    )
+
+branching_supported = bool(planning_end_ids) and thread_end_is_single_token and parallel_stats_available
+if args.branching_generate and not branching_supported:
+    warnings.warn(
+        "Branching generation requested but required special tokens are missing. "
+        "Falling back to sequential generation for this run.",
+        RuntimeWarning,
+    )
+    args.branching_generate = False
 
 # Display the first few rows to check the data
 print(f"Loaded {data_type} dataset with {len(df)} rows")
@@ -439,6 +464,24 @@ def apply_chat_template(messages):
 
 
 print(f"Example chat message: {apply_chat_template(messages_list[0])}")
+
+
+def compute_parallel_stats_safe(response_token_ids):
+    if special_token_ids is None:
+        total_num_tokens = len(response_token_ids)
+        return {
+            "total_num_tokens": total_num_tokens,
+            "num_tokens_in_the_longest_thread": total_num_tokens,
+            "with_parallel": False,
+            "parallel_count": 0,
+            "parallel_ratio": 0.0,
+            "acceleration_ratio": 0.0,
+            "avg_tokens_per_parallel_block": 0.0,
+            "thread_counts_per_block": 0.0,
+            "parallel_format_correct": True,
+            "parallel_format_correct_v2": True,
+        }
+    return get_parallel_stats(response_token_ids, special_token_ids)
 
 
 def generate_single_sample(prompt_token_ids, messages, stop_tokens_ids):
@@ -531,7 +574,7 @@ def branching_generate(
 
     def _get_longest_thread_tokens(text: str) -> int:
         token_ids = tokenizer.encode(text, add_special_tokens=False)
-        stats = get_parallel_stats(token_ids, special_token_ids)
+        stats = compute_parallel_stats_safe(token_ids)
         return stats["num_tokens_in_the_longest_thread"]
 
     def _append_think_close_if_missing(text: str) -> str:
@@ -918,7 +961,9 @@ def process_sample(message_idx, sample_idx, jsonl_file_path, lock):
     if args.branching_generate:
         stop_tokens_ids = []  # Branching generation does not use stop tokens
     else:
-        stop_tokens_ids = planning_end_ids + [thread_end_id]
+        stop_tokens_ids = list(planning_end_ids)
+        if thread_end_is_single_token:
+            stop_tokens_ids.append(thread_end_id)
         if not args.no_stop_at_eos:
             stop_tokens_ids.append(eos_id)
 
@@ -1174,7 +1219,7 @@ for i in range(total):
 
         # Compute parallel stats for each response
         response_token_ids = tokenizer.encode(r, add_special_tokens=False)
-        parallel_stats = get_parallel_stats(response_token_ids, special_token_ids)
+        parallel_stats = compute_parallel_stats_safe(response_token_ids)
         acceleration_ratios.append(parallel_stats["acceleration_ratio"])
         parallel_ratios.append(parallel_stats["parallel_ratio"])
         num_tokens_list.append(parallel_stats["total_num_tokens"])
