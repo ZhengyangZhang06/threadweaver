@@ -324,6 +324,32 @@ def summarize_reward_extra(values_by_key: dict[str, Any], prefix: str) -> dict[s
             for category, count in counts.items():
                 metrics[f"{prefix}/{key}/{category}"] = count / total
 
+    # Canonical aliases for parallel-ratio metrics to make W&B dashboards easier.
+    # Reward code may emit either {subtask_ratio, trial_ratio} or
+    # {subtask_parallel_ratio, trial_parallel_ratio}; support both.
+    parallel_ratio = metrics.get(f"{prefix}/parallel_ratio/mean")
+    subtask_parallel_ratio = metrics.get(f"{prefix}/subtask_parallel_ratio/mean")
+    if subtask_parallel_ratio is None:
+        subtask_parallel_ratio = metrics.get(f"{prefix}/subtask_ratio/mean")
+    trial_parallel_ratio = metrics.get(f"{prefix}/trial_parallel_ratio/mean")
+    if trial_parallel_ratio is None:
+        trial_parallel_ratio = metrics.get(f"{prefix}/trial_ratio/mean")
+
+    if prefix == "reward_extra":
+        if parallel_ratio is not None:
+            metrics["metrics/parallel_ratio"] = float(parallel_ratio)
+        if subtask_parallel_ratio is not None:
+            metrics["metrics/subtask_parallel_ratio"] = float(subtask_parallel_ratio)
+        if trial_parallel_ratio is not None:
+            metrics["metrics/trial_parallel_ratio"] = float(trial_parallel_ratio)
+    elif prefix == "val-extra":
+        if parallel_ratio is not None:
+            metrics["val/parallel_ratio"] = float(parallel_ratio)
+        if subtask_parallel_ratio is not None:
+            metrics["val/subtask_parallel_ratio"] = float(subtask_parallel_ratio)
+        if trial_parallel_ratio is not None:
+            metrics["val/trial_parallel_ratio"] = float(trial_parallel_ratio)
+
     return metrics
 
 
