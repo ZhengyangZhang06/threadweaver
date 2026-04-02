@@ -1,5 +1,5 @@
 uid="$(date +%Y%m%d_%H%M%S)"
-base_model="Qwen/Qwen3-8B-131072"
+base_model="/storage/openpis/models/Qwen__Qwen3-8B"
 lr=1e-5
 min_lr=0
 epochs=1
