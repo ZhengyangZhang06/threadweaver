@@ -83,7 +83,7 @@ parser.add_argument(
     "--data-type",
     type=str,
     default="./data/mult-10k-par_pq/train.parquet",
-    help="Type of dataset to evaluate. Default is './data/mult-10k-par_pq/train.parquet'.",
+    help="Dataset to evaluate. Prefer a direct parquet file path. Default is './data/mult-10k-par_pq/train.parquet'.",
 )
 parser.add_argument(
     "-n",
@@ -226,16 +226,24 @@ client = OpenAI(
     timeout=3600,
 )
 
-if "/" in args.data_type:
-    if args.data_type.split("/")[-1].split(".")[0] in ["train", "test", "val"]:
-        # If the data_type is a split of a dataset, we need to extract the base name
-        # and use it to construct the path.
-        data_path = args.data_type
-        args.data_type = data_type = args.data_type.split("/")[-2]
+raw_data_type = os.path.expanduser(args.data_type)
+normalized_data_type = raw_data_type.rstrip("/\\")
+split_name = os.path.splitext(os.path.basename(normalized_data_type))[0]
+
+if normalized_data_type.lower().endswith(".parquet"):
+    data_path = normalized_data_type
+    if split_name in ["train", "test", "val"]:
+        parent_name = os.path.basename(os.path.dirname(normalized_data_type))
+        data_type = parent_name or split_name
     else:
-        data_path = args.data_type.rstrip("/") + "/val.parquet"
-        args.data_type = data_type = args.data_type.rstrip("/").split("/")[-1]
+        data_type = split_name
+elif os.path.isdir(normalized_data_type):
+    raise ValueError(
+        "--data-type points to a directory. Please pass a parquet file path "
+        "(for example: /path/to/train.parquet)."
+    )
 else:
+    # Backward compatibility: allow dataset keys like "my_dataset" and resolve to data/my_dataset.parquet.
     data_type = args.data_type
     data_path = os.path.expanduser(f"data/{data_type}.parquet")
 

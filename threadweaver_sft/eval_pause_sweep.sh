@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <checkpoint_path> [--data-type|-d <data_path>] [-n|--n-samples <num>] [--bfloat16] [--verbose <level>] [extra args for simple_eval_pause.py]"
+  echo "Usage: $0 <checkpoint_path> [--data-type|-d <parquet_path_or_dataset_key>] [-n|--n-samples <num>] [--bfloat16] [--verbose <level>] [extra args for simple_eval_pause.py]"
   echo "Example: $0 ckpts/Q3-8B-131072-SFT --data-type data/mult-10k-par_pq/train.parquet --bfloat16 --verbose 2 -n 32"
 }
 
@@ -74,7 +74,7 @@ fi
 TOKEN_LIMITS=(4096 8192 16384 24576 32768 40960)
 DATA_TYPE="${DATA_TYPE_FROM_CLI:-${DATA_TYPE:-}}"
 if [[ -z "${DATA_TYPE}" ]]; then
-  read -r -p "Enter --data-type path: " DATA_TYPE
+  read -r -p "Enter --data-type parquet path (or dataset key): " DATA_TYPE
 fi
 if [[ -z "${DATA_TYPE}" ]]; then
   echo "Error: --data-type is required."
