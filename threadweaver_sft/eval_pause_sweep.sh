@@ -1,15 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  echo "Usage: $0 <checkpoint_path> [--data-type|-d <data_path>] [extra args for simple_eval_pause.py]"
+  echo "Example: $0 ckpts/Q3-8B-131072-SFT --data-type data/mult-10k-par_pq/train.parquet --bfloat16 --verbose 2 -n 1"
+}
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <checkpoint_path> [extra args for simple_eval_pause.py]"
-  echo "Example: $0 ckpts/Q3-8B-131072-SFT --bfloat16 --verbose 2 -n 1"
+  usage
   exit 1
 fi
 
 CHECKPOINT_PATH="$1"
 shift
-EXTRA_ARGS=("$@")
+
+DATA_TYPE_FROM_CLI=""
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --data-type|-d)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: $1 requires a value."
+        usage
+        exit 1
+      fi
+      DATA_TYPE_FROM_CLI="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_SCRIPT="${SCRIPT_DIR}/src/simple_eval_pause.py"
@@ -20,7 +47,14 @@ if [[ ! -f "${EVAL_SCRIPT}" ]]; then
 fi
 
 TOKEN_LIMITS=(4096 8192 16384 24576 32768 40960)
-DATA_TYPE="${DATA_TYPE:-data/mult-10k-par_pq/train.parquet}"
+DATA_TYPE="${DATA_TYPE_FROM_CLI:-${DATA_TYPE:-}}"
+if [[ -z "${DATA_TYPE}" ]]; then
+  read -r -p "Enter --data-type path: " DATA_TYPE
+fi
+if [[ -z "${DATA_TYPE}" ]]; then
+  echo "Error: --data-type is required."
+  exit 1
+fi
 N_SAMPLES="${N_SAMPLES:-1}"
 MAX_CONTEXT_LENGTH="${MAX_CONTEXT_LENGTH:-40960}"
 TEMPLATE_TYPE="${TEMPLATE_TYPE:-model}"
