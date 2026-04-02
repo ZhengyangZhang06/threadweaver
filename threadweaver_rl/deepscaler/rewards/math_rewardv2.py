@@ -349,34 +349,9 @@ def calculate_reward(config: RewardConfig, model_response: str, correct_lenient:
     reward += acceleration_reward
     reward += parallel_reward
 
-    reward_before_subtask_trial = reward
-    subtask_trial_multiplier = 1.0
-    subtask_term = 0.0
-    trial_term = 0.0
-
-    if config.subtask_trial_reward_enabled:
-        fn_type = config.subtask_trial_reward_fn
-        sub_ratio = float(parallel_stats.get("subtask_ratio", 0.0))
-        trial_ratio = float(parallel_stats.get("trial_ratio", 0.0))
-
-        sub_z = _safe_normalize(sub_ratio, config.subtask_trial_norm_mu, config.subtask_trial_norm_sigma)
-        trial_z = _safe_normalize(trial_ratio, config.subtask_trial_norm_mu, config.subtask_trial_norm_sigma)
-
-        sub_f = _apply_reward_transform(sub_z, fn_type)
-        trial_f = _apply_reward_transform(trial_z, fn_type)
-
-        subtask_term = config.subtask_reward_beta * sub_f
-        trial_term = config.trial_reward_beta * trial_f
-        subtask_trial_multiplier = 1.0 + subtask_term + trial_term
-        reward = reward * subtask_trial_multiplier
-
     extra_info.update({
         "acceleration_reward": acceleration_reward,
         "parallel_reward": parallel_reward,
-        "reward_before_subtask_trial": reward_before_subtask_trial,
-        "subtask_trial_multiplier": subtask_trial_multiplier,
-        "subtask_reward_term": subtask_term,
-        "trial_reward_term": trial_term,
     })
 
     return reward, extra_info
@@ -403,6 +378,18 @@ class RewardMathFnv2(RewardFn):
         assert self.config.parallel_ratio_reward == 0., "parallel_ratio_reward is deprecated"
         assert not self.config.parallel_format_error_reward_enabled, "parallel_format_error_reward_enabled is deprecated"
         assert not self.config.parallel_format_error_v2_reward_enabled, "parallel_format_error_v2_reward_enabled is deprecated"
+
+        if (
+            self.config.subtask_trial_reward_enabled
+            or self.config.subtask_reward_beta != 0.0
+            or self.config.trial_reward_beta != 0.0
+            or self.config.parallel_ratio_reward_beta != 0.0
+        ):
+            print(
+                "WARNING: subtask_trial_* shaping knobs are deprecated and ignored. "
+                "Use group-wise shaping knobs in reward_manager config: "
+                "{subtask_beta, trial_beta, parallel_ratio_beta, latency_alpha}."
+            )
 
         # allow_immediate_stop is deprecated and ignored (allowed to be set to True or False)
 

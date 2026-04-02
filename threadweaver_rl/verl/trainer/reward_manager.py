@@ -3,6 +3,7 @@ import threading
 import os
 import multiprocessing as mp
 import time
+import numpy as np
 
 from verl import DataProto
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
@@ -19,6 +20,118 @@ _MAX_CACHE_SIZE = 1000000  # 1M
 
 # print_verbose = print
 print_verbose = lambda *args, **kwargs: None
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _cfg_float(config, key: str, default: float = 0.0) -> float:
+    try:
+        if hasattr(config, "get"):
+            return _safe_float(config.get(key, default), default)
+    except Exception:
+        pass
+    try:
+        return _safe_float(config[key], default)
+    except Exception:
+        return default
+
+
+def _groupwise_zscore(values: np.ndarray, group_ids: list[str], eps: float) -> np.ndarray:
+    z = np.zeros_like(values, dtype=np.float32)
+    groups: dict[str, list[int]] = {}
+    for idx, gid in enumerate(group_ids):
+        groups.setdefault(gid, []).append(idx)
+
+    for _, idxs in groups.items():
+        group_vals = values[idxs]
+        mu = float(np.mean(group_vals))
+        sigma = float(np.std(group_vals))
+        if sigma <= eps:
+            z[idxs] = 0.0
+        else:
+            z[idxs] = (group_vals - mu) / sigma
+    return z
+
+
+def _apply_groupwise_grpo_shaping(
+    scores: list[dict],
+    extra_infos: list[dict],
+    uid_values,
+    config,
+) -> tuple[list[dict], list[dict]]:
+    beta_1 = _cfg_float(config, "subtask_beta", _cfg_float(config, "subtask_reward_beta", 0.0))
+    beta_2 = _cfg_float(config, "trial_beta", _cfg_float(config, "trial_reward_beta", 0.0))
+    beta_3 = _cfg_float(config, "parallel_ratio_beta", _cfg_float(config, "parallel_ratio_reward_beta", 0.0))
+    alpha = _cfg_float(config, "latency_alpha", 0.0)
+    eps = max(1e-12, _cfg_float(config, "group_shaping_eps", 1e-8))
+
+    if abs(beta_1) + abs(beta_2) + abs(beta_3) + abs(alpha) <= 0.0:
+        return scores, extra_infos
+
+    n = len(scores)
+    if len(extra_infos) != n:
+        extra_infos = list(extra_infos)[:n] + [{} for _ in range(max(0, n - len(extra_infos)))]
+
+    if uid_values is None:
+        group_ids = [str(i) for i in range(n)]
+    else:
+        try:
+            uid_list = uid_values.tolist() if hasattr(uid_values, "tolist") else list(uid_values)
+        except Exception:
+            uid_list = [uid_values] * n
+        if len(uid_list) != n:
+            group_ids = [str(i) for i in range(n)]
+        else:
+            group_ids = [str(u) for u in uid_list]
+
+    subtask_ratio = np.array([_safe_float((extra_infos[i] or {}).get("subtask_ratio", 0.0)) for i in range(n)], dtype=np.float32)
+    trial_ratio = np.array([_safe_float((extra_infos[i] or {}).get("trial_ratio", 0.0)) for i in range(n)], dtype=np.float32)
+    parallel_ratio = np.array([_safe_float((extra_infos[i] or {}).get("parallel_ratio", 0.0)) for i in range(n)], dtype=np.float32)
+    # Latency proxy: acceleration_ratio (higher => lower latency).
+    latency_signal = np.array(
+        [_safe_float((extra_infos[i] or {}).get("acceleration_ratio", 0.0)) for i in range(n)], dtype=np.float32
+    )
+
+    subtask_z = _groupwise_zscore(subtask_ratio, group_ids, eps=eps)
+    trial_z = _groupwise_zscore(trial_ratio, group_ids, eps=eps)
+    parallel_z = _groupwise_zscore(parallel_ratio, group_ids, eps=eps)
+    latency_z = _groupwise_zscore(latency_signal, group_ids, eps=eps)
+
+    shaping_term = beta_1 * subtask_z + beta_2 * trial_z + beta_3 * parallel_z + alpha * latency_z
+    shaping_multiplier = 1.0 + shaping_term
+
+    shaped_scores: list[dict] = []
+    shaped_extra_infos: list[dict] = []
+    for i in range(n):
+        score = scores[i] if isinstance(scores[i], dict) else {"reward": _safe_float(scores[i], 0.0), "second_reward": 0.0}
+        score = dict(score)
+        base_reward = _safe_float(score.get("reward", 0.0), 0.0)
+        score["reward"] = base_reward * float(shaping_multiplier[i])
+        shaped_scores.append(score)
+
+        info = dict(extra_infos[i] or {})
+        info["group_shaping_beta_1"] = beta_1
+        info["group_shaping_beta_2"] = beta_2
+        info["group_shaping_beta_3"] = beta_3
+        info["group_shaping_alpha"] = alpha
+        info["group_shaping_subtask_z"] = float(subtask_z[i])
+        info["group_shaping_trial_z"] = float(trial_z[i])
+        info["group_shaping_parallel_ratio_z"] = float(parallel_z[i])
+        info["group_shaping_latency_z"] = float(latency_z[i])
+        info["group_shaping_term"] = float(shaping_term[i])
+        info["group_shaping_multiplier"] = float(shaping_multiplier[i])
+        info["reward_before_group_shaping"] = base_reward
+        info["reward_after_group_shaping"] = score["reward"]
+        shaped_extra_infos.append(info)
+
+    return shaped_scores, shaped_extra_infos
 
 def _select_rm_score_fn(data_source):
     return deepscaler_reward_fn
@@ -280,14 +393,16 @@ class RewardManager:
 
         # print("Done with all results")
 
-        sequences_strs = []
-        extra_infos = []
-        # Fill reward tensor with results
-        for i, score, valid_response_length, sequences_str, extra_info in results:
-            reward_tensor[i, valid_response_length - 1] = score["reward"]
-            secondary_reward_tensor[i, valid_response_length - 1] = score["second_reward"]
-            sequences_strs.append(sequences_str)
-            extra_infos.append(extra_info)
+        scores = [res[1] for res in results]
+        extra_infos = [res[4] or {} for res in results]
+        uid_values = data.non_tensor_batch.get("uid")
+        scores, extra_infos = _apply_groupwise_grpo_shaping(scores, extra_infos, uid_values, self.config)
+
+        # Fill reward tensor with (possibly shaped) results
+        for idx, (i, _, valid_response_length, _, _) in enumerate(results):
+            score = scores[idx] if isinstance(scores[idx], dict) else {"reward": _safe_float(scores[idx]), "second_reward": 0.0}
+            reward_tensor[i, valid_response_length - 1] = _safe_float(score.get("reward", 0.0))
+            secondary_reward_tensor[i, valid_response_length - 1] = _safe_float(score.get("second_reward", 0.0))
 
         # Turn extra_infos from list of dicts to dict of lists
         extra_infos_dict = {}

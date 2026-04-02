@@ -53,18 +53,29 @@ class RewardConfig:
     # type: linear/cosine/tanh
     acceleration_ratio_curve: str = "linear"
 
-    # Multiplicative parallelism rewards:
-    # reward = existing_reward * (
-    #   1 + beta1 * f((subtask_ratio - mu) / sigma)
-    #     + beta2 * f((trial_ratio - mu) / sigma)
+    # GRPO group-wise reward shaping coefficients:
+    # reward_i = base_reward_i * (
+    #   1
+    #   + beta_1 * z(subtask_ratio_i)
+    #   + beta_2 * z(trial_ratio_i)
+    #   + beta_3 * z(parallel_ratio_i)
+    #   + alpha  * z(acceleration_ratio_i)
     # )
-    # f supports: "linear", "sigmoid"
+    # z(.) is group-wise normalization computed within each GRPO group.
+    subtask_beta: float = 0.0
+    trial_beta: float = 0.0
+    parallel_ratio_beta: float = 0.0
+    latency_alpha: float = 0.0
+    group_shaping_eps: float = 1e-8
+
+    # Deprecated old shaping knobs (kept for backward compatibility only).
     subtask_trial_reward_enabled: bool = False
     subtask_trial_reward_fn: str = "linear"
     subtask_trial_norm_mu: float = 0.0
     subtask_trial_norm_sigma: float = 1.0
     subtask_reward_beta: float = 0.0
     trial_reward_beta: float = 0.0
+    parallel_ratio_reward_beta: float = 0.0
 
     # If enabled, the reward will be -parallel_format_error_reward or -parallel_format_error_v2_reward if the trajectory is ill-formatted
     parallel_format_error_reward_enabled: bool = False
