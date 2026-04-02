@@ -935,37 +935,72 @@ def process_sample(message_idx, sample_idx, jsonl_file_path, lock):
             f_jsonl.flush()  # Ensure data is written immediately
 
     print(
-        f"Completed and saved sample {sample_idx+1}/{n_samples} for message {msg_idx+1}/{len(messages_list)}"
+        f"Completed and saved sample {sample_idx+1}/{n_samples} for message {message_idx+1}/{len(messages_list)}"
     )
 
     progress_bar.update(1)
     return message_idx, sample_idx, result
 
 
-save_base_path = model_path.split("/")[-1]
-if save_base_path.startswith("global_step_"):
-    save_base_path = model_path.split("/")[-2] + "_" + save_base_path
+def _resolve_results_root_for_model(model_path: str) -> str:
+    expanded = os.path.abspath(os.path.expanduser(model_path))
+    if os.path.isdir(expanded):
+        return expanded
+    if os.path.exists(expanded):
+        return os.path.dirname(expanded)
+    # Fallback for non-local model names.
+    return os.path.abspath(".")
+
+
+def _sanitize_name(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", value).strip("_")
+
+
+normalized_model_path = os.path.normpath(model_path.rstrip("/\\"))
+model_leaf_name = os.path.basename(normalized_model_path) or "model"
+model_parent_leaf = os.path.basename(os.path.dirname(normalized_model_path))
+run_name = model_leaf_name
+if model_leaf_name.startswith("global_step_") and model_parent_leaf:
+    run_name = f"{model_parent_leaf}_{model_leaf_name}"
+run_name = _sanitize_name(run_name)
 if args.suffix:
-    save_base_path += f"_{args.suffix}"
+    run_name += f"_{_sanitize_name(args.suffix)}"
 
 # Add split suffix to filenames if using dataset splitting
 split_suffix = f"_split{args.current_split}_of_{args.total_splits}" if args.total_splits > 1 else ""
+pause_suffix = (
+    f"_pause{args.pause_at_longest_thread_tokens}"
+    if args.pause_at_longest_thread_tokens is not None
+    else ""
+)
+file_stem = f"{_sanitize_name(data_type)}_{n_samples}{split_suffix}{pause_suffix}"
+checkpoint_results_root = _resolve_results_root_for_model(model_path)
 
 if not args.debug:
-    results_dir = f"{save_base_path}"
-    jsonl_file = f"{results_dir}/{data_type}_{n_samples}{split_suffix}.jsonl"
-    final_json_file = f"{results_dir}/{data_type}_{n_samples}{split_suffix}.json"
+    results_dir = os.path.join(checkpoint_results_root, "eval_pause_outputs", run_name)
+    jsonl_file = os.path.join(results_dir, f"{file_stem}.jsonl")
+    final_json_file = os.path.join(results_dir, f"{file_stem}.json")
+    metrics_json_file = os.path.join(results_dir, f"{file_stem}_metrics.json")
+    report_md_file = os.path.join(results_dir, f"{file_stem}_report.md")
     print(f"Results will be saved to: {jsonl_file}")
     print(f"Final JSON will be saved to: {final_json_file}")
+    print(f"Metrics JSON will be saved to: {metrics_json_file}")
+    print(f"Markdown report will be saved to: {report_md_file}")
 else:
     # Save to a temporary file for debugging
     timestamp = int(time.time())
-    results_dir = f"debug_logs/{save_base_path}_{timestamp}_debug"
-    jsonl_file = f"{results_dir}/{data_type}_{n_samples}{split_suffix}.jsonl"
-    final_json_file = f"{results_dir}/{data_type}_{n_samples}{split_suffix}.json"
+    results_dir = os.path.join(
+        checkpoint_results_root, "eval_pause_outputs", f"{run_name}_{timestamp}_debug"
+    )
+    jsonl_file = os.path.join(results_dir, f"{file_stem}.jsonl")
+    final_json_file = os.path.join(results_dir, f"{file_stem}.json")
+    metrics_json_file = os.path.join(results_dir, f"{file_stem}_metrics.json")
+    report_md_file = os.path.join(results_dir, f"{file_stem}_report.md")
     print(
         f"Debug mode: Results will be saved to temporary files: {jsonl_file} and {final_json_file}"
     )
+    print(f"Debug mode: Metrics JSON will be saved to: {metrics_json_file}")
+    print(f"Debug mode: Markdown report will be saved to: {report_md_file}")
 
 os.makedirs(results_dir, exist_ok=True)
 
@@ -1201,3 +1236,53 @@ print(f"Average parallel_ratio: {avg_parallel_ratio:.4f}")
 print(f"Average total_num_tokens: {avg_total_num_tokens:.2f}")
 print(f"Average num_tokens_in_the_longest_thread: {avg_num_tokens_longest:.2f}")
 print("="*50 + "\n")
+
+metrics_payload = {
+    "model_name": model_name,
+    "model_path": model_path,
+    "data_type": data_type,
+    "n_samples": n_samples,
+    "max_context_length": max_context_length,
+    "pause_at_longest_thread_tokens": args.pause_at_longest_thread_tokens,
+    "pass@1": float(pass_at_1),
+    f"pass@{n_samples}": float(pass_at_n),
+    "sampling_accuracies": [float(acc) for acc in sampling_accs],
+    "avg_acceleration_ratio": float(avg_acceleration_ratio),
+    "avg_parallel_ratio": float(avg_parallel_ratio),
+    "avg_total_num_tokens": float(avg_total_num_tokens),
+    "avg_num_tokens_in_the_longest_thread": float(avg_num_tokens_longest),
+    "num_tokens_in_longest_thread_list": total_num_tokens_in_longest_thread_list,
+    "num_tokens_in_longest_thread_flat": all_num_tokens_longest,
+    "results_dir": results_dir,
+    "jsonl_file": jsonl_file,
+    "final_json_file": final_json_file,
+}
+
+with open(metrics_json_file, "w") as f:
+    json.dump(metrics_payload, f, indent=2)
+
+print(f"Saved metrics summary to: {metrics_json_file}")
+
+with open(report_md_file, "w") as f:
+    f.write("# Simple Eval Pause Report\n\n")
+    f.write(f"- model_name: {model_name}\n")
+    f.write(f"- model_path: {model_path}\n")
+    f.write(f"- data_type: {data_type}\n")
+    f.write(f"- n_samples: {n_samples}\n")
+    f.write(f"- max_context_length: {max_context_length}\n")
+    f.write(
+        f"- pause_at_longest_thread_tokens: {args.pause_at_longest_thread_tokens}\n\n"
+    )
+    f.write("## Accuracy\n\n")
+    f.write(f"- pass@1: {pass_at_1:.6f}\n")
+    f.write(f"- pass@{n_samples}: {pass_at_n:.6f}\n")
+    f.write(f"- sampling_accuracies: {sampling_accs}\n\n")
+    f.write("## Parallel Metrics\n\n")
+    f.write(f"- avg_acceleration_ratio: {avg_acceleration_ratio:.6f}\n")
+    f.write(f"- avg_parallel_ratio: {avg_parallel_ratio:.6f}\n")
+    f.write(f"- avg_total_num_tokens: {avg_total_num_tokens:.2f}\n")
+    f.write(f"- avg_num_tokens_in_the_longest_thread: {avg_num_tokens_longest:.2f}\n\n")
+    f.write("## num_tokens_in_longest_thread_list\n\n")
+    f.write(f"{total_num_tokens_in_longest_thread_list}\n")
+
+print(f"Saved markdown report to: {report_md_file}")

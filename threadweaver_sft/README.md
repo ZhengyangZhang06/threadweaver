@@ -68,3 +68,23 @@ Reference result:
 With strict grading function:
 Pass@1: 0.9377 (93.77)
 ```
+
+## Pause-Limit Sweep (4096 ~ 40960)
+To evaluate one checkpoint across multiple `num_tokens_in_the_longest_thread` pause limits and generate a summary report:
+
+```bash
+# Optional overrides:
+#   DATA_TYPE=data/mult-10k-par_pq/train.parquet
+#   N_SAMPLES=1
+#   MAX_CONTEXT_LENGTH=40960
+./eval_pause_sweep.sh ckpts/Q3-8B-131072-SFT --bfloat16 --verbose 2
+```
+
+This runs `src/simple_eval_pause.py` at pause limits:
+`4096, 8192, 16384, 24576, 32768, 40960`.
+
+Outputs are saved under the checkpoint directory:
+- `eval_pause_outputs/<run_name>/*_metrics.json` (per-run details including `num_tokens_in_longest_thread_list`)
+- `eval_pause_outputs/<run_name>/*_report.md` (per-run human-readable report)
+- `eval_pause_outputs/pause_sweep_report.csv`
+- `eval_pause_outputs/pause_sweep_report.md`
