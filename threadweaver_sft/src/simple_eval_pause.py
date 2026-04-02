@@ -494,6 +494,28 @@ def _longest_thread_tokens_for_text(text: str) -> int:
     return stats["num_tokens_in_the_longest_thread"]
 
 
+def _count_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return len(tokenizer.encode(text, add_special_tokens=False))
+
+
+def _remaining_longest_thread_budget(
+    current_text: str, reserve_tokens: int = 0
+) -> Union[int, None]:
+    if args.pause_at_longest_thread_tokens is None:
+        return None
+    used = _longest_thread_tokens_for_text(current_text)
+    return args.pause_at_longest_thread_tokens - used - max(0, reserve_tokens)
+
+
+def _reserve_tokens_for_branch_merge(num: str) -> int:
+    # Conservative reserve for deterministic structure merged outside branch generation.
+    # Using token count as an upper bound on possible longest-thread increase.
+    structural = f"\n<Thread>\n{num}:</Thread>\n"
+    return _count_tokens(structural)
+
+
 def _truncate_to_longest_thread_budget(text: str, budget: int) -> str:
     if budget <= 0 or not text:
         return ""
@@ -778,15 +800,19 @@ def branching_generate(
         capped_by_longest_thread_limit = False
         remaining_for_longest = None
         if args.pause_at_longest_thread_tokens is not None:
+            branch_structure_reserve = _reserve_tokens_for_branch_merge(num)
             remaining_for_longest = (
-                args.pause_at_longest_thread_tokens - longest_thread_tokens_before_round
+                args.pause_at_longest_thread_tokens
+                - longest_thread_tokens_before_round
+                - branch_structure_reserve
             )
             if remaining_for_longest <= 0:
                 if verbose:
                     print(
                         colored(
                             f"Skipping branch {num}: longest thread already reached pause threshold "
-                            f"({longest_thread_tokens_before_round}/{args.pause_at_longest_thread_tokens}).",
+                            f"({longest_thread_tokens_before_round}/{args.pause_at_longest_thread_tokens}), "
+                            f"reserve={branch_structure_reserve}.",
                             "yellow",
                         )
                     )
@@ -836,6 +862,38 @@ def branching_generate(
                 print(f"Input prompt:\n{base_prompt}\n" + "=" * 20)
 
             try:
+                planning_max_new_tokens = sampling_params["max_new_tokens"]
+                if args.pause_at_longest_thread_tokens is not None:
+                    planning_stop_reserve = max(
+                        (_count_tokens(tag) for tag in planning_end_tags), default=0
+                    )
+                    remaining_for_planning = _remaining_longest_thread_budget(
+                        base_prompt, reserve_tokens=planning_stop_reserve
+                    )
+                    if remaining_for_planning is not None and remaining_for_planning <= 0:
+                        if verbose:
+                            print(
+                                colored(
+                                    "Pause threshold reached before planning generation. "
+                                    "Appending </think> and continuing generation.",
+                                    "yellow",
+                                )
+                            )
+                        paused_text = _append_think_close_if_missing(base_prompt)
+                        return _continue_until_normal_stop(paused_text)
+                    planning_max_new_tokens = min(
+                        planning_max_new_tokens, remaining_for_planning
+                    )
+                    planning_max_new_tokens = max(1, planning_max_new_tokens)
+                    if verbose:
+                        print(
+                            colored(
+                                "Planning max_new_tokens constrained by pause limit: "
+                                f"{planning_max_new_tokens} (reserve={planning_stop_reserve})",
+                                "blue",
+                            )
+                        )
+
                 outlines_text, outlines_full, hit, _ = generate_until_any(
                     model_name,
                     tokenizer,
@@ -844,7 +902,7 @@ def branching_generate(
                     # do_sample=sampling_params["temperature"] > 0,
                     temperature=sampling_params["temperature"],
                     top_p=sampling_params["top_p"],
-                    max_new_tokens=sampling_params["max_new_tokens"],
+                    max_new_tokens=planning_max_new_tokens,
                 )
             except ValueError as e:
                 # Likely during overlong generation
