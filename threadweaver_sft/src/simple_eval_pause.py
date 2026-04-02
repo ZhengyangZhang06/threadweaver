@@ -185,6 +185,12 @@ parser.add_argument(
     action="store_true",
     help="If set, skip the check for the system prompt in the chat template. This is useful if you are sure the system prompt is correct or if you are using a model that does not have a system prompt.",
 )
+parser.add_argument(
+    "--pause-at-longest-thread-tokens",
+    type=int,
+    default=None,
+    help="If set, branching generation stops as soon as num_tokens_in_the_longest_thread reaches this value.",
+)
 args = parser.parse_args()
 
 # Validate split arguments
@@ -194,6 +200,13 @@ if args.current_split < 0:
     raise ValueError(f"current-split ({args.current_split}) must be non-negative")
 if args.total_splits < 1:
     raise ValueError(f"total-splits ({args.total_splits}) must be at least 1")
+if (
+    args.pause_at_longest_thread_tokens is not None
+    and args.pause_at_longest_thread_tokens <= 0
+):
+    raise ValueError(
+        "--pause-at-longest-thread-tokens must be a positive integer when set."
+    )
 
 openai_api_key = "EMPTY"
 if args.port is None:
@@ -488,7 +501,7 @@ def generate_until_any(
     else:
         raise ValueError(f"Unexpected finish reason: {finish_reason}")
     full_text = prompt + gen_text
-    return gen_text, full_text, hit
+    return gen_text, full_text, hit, finish_reason
 
 def branching_generate(
     model_name,
@@ -508,21 +521,131 @@ def branching_generate(
     4) Merge all threads
     """
 
-    def _generate_branch(outlines_full: str, num: str):
+    def _get_longest_thread_tokens(text: str) -> int:
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+        stats = get_parallel_stats(token_ids, special_token_ids)
+        return stats["num_tokens_in_the_longest_thread"]
+
+    def _append_think_close_if_missing(text: str) -> str:
+        lowered = text.lower()
+        if "</think>" in lowered:
+            return text
+        if not text.endswith("\n"):
+            text += "\n"
+        return text + "</think>\n"
+
+    def _continue_until_normal_stop(prompt_text: str) -> str:
+        current_text = prompt_text
+        while True:
+            prompt_token_ids = tokenizer.encode(current_text, add_special_tokens=False)
+            remaining_context_tokens = max_context_length - len(prompt_token_ids) - 1
+            if remaining_context_tokens <= 0:
+                if verbose:
+                    print(
+                        colored(
+                            "Cannot continue after pause: no remaining context budget.",
+                            "yellow",
+                        )
+                    )
+                return current_text
+
+            stop_tokens_ids = [] if args.no_stop_at_eos else [eos_id]
+            completion = client.completions.create(
+                model=model_name,
+                prompt=prompt_token_ids,
+                max_tokens=remaining_context_tokens,
+                temperature=sampling_params["temperature"],
+                top_p=sampling_params["top_p"],
+                extra_body={
+                    "add_special_tokens": False,
+                    "skip_special_tokens": False,
+                    "stop_tokens_ids": stop_tokens_ids,
+                },
+            )
+
+            gen_text = completion.choices[0].text
+            finish_reason = completion.choices[0].finish_reason
+            current_text += gen_text
+
+            if finish_reason == "stop":
+                return current_text
+            if finish_reason == "length":
+                if verbose:
+                    print(
+                        colored(
+                            "Continuation stopped by context length before normal stop.",
+                            "yellow",
+                        )
+                    )
+                return current_text
+            raise ValueError(f"Unexpected finish reason during continuation: {finish_reason}")
+
+    def _generate_branch(
+        outlines_full: str, num: str, longest_thread_tokens_before_round: int
+    ):
         branch_prompt = outlines_full + f"\n<Thread>\n{num}:"
+        branch_prompt_token_ids = tokenizer.encode(branch_prompt, add_special_tokens=False)
+        remaining_context_tokens = max_context_length - len(branch_prompt_token_ids) - 1
+        if remaining_context_tokens <= 0:
+            if verbose:
+                print(
+                    colored(
+                        f"Skipping branch {num}: no remaining context budget ({remaining_context_tokens}).",
+                        "yellow",
+                    )
+                )
+            return thread_end
+
+        per_branch_max_new_tokens = min(
+            sampling_params["max_new_tokens"], remaining_context_tokens
+        )
+        capped_by_longest_thread_limit = False
+        remaining_for_longest = None
+        if args.pause_at_longest_thread_tokens is not None:
+            remaining_for_longest = (
+                args.pause_at_longest_thread_tokens - longest_thread_tokens_before_round
+            )
+            if remaining_for_longest <= 0:
+                if verbose:
+                    print(
+                        colored(
+                            f"Skipping branch {num}: longest thread already reached pause threshold "
+                            f"({longest_thread_tokens_before_round}/{args.pause_at_longest_thread_tokens}).",
+                            "yellow",
+                        )
+                    )
+                return thread_end
+            per_branch_max_new_tokens = min(
+                per_branch_max_new_tokens, remaining_for_longest
+            )
+            capped_by_longest_thread_limit = (
+                per_branch_max_new_tokens == remaining_for_longest
+            )
+
+        per_branch_max_new_tokens = max(1, per_branch_max_new_tokens)
         if verbose:
             print(colored(f"Generating branch for outline: {num}", "blue"))
             print(colored(f"Branch prompt:\n{branch_prompt}\n" + "-" * 20, "blue"))
-        branch_gen, _, _ = generate_until_any(
+            print(
+                colored(
+                    f"Branch max_new_tokens={per_branch_max_new_tokens} "
+                    f"(remaining_context={remaining_context_tokens})",
+                    "blue",
+                )
+            )
+        branch_gen, _, _, finish_reason = generate_until_any(
             model_name,
             tokenizer,
             prompt=branch_prompt,
             stop=[thread_end],
             temperature=sampling_params["temperature"],
             top_p=sampling_params["top_p"],
-            max_new_tokens=sampling_params["max_new_tokens"],
+            max_new_tokens=per_branch_max_new_tokens,
         )
-        return branch_gen
+        hit_longest_thread_limit = (
+            capped_by_longest_thread_limit and finish_reason == "length"
+        )
+        return branch_gen, hit_longest_thread_limit
 
     max_workers = max(1, reasoning_parallel_workers)
     executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -537,7 +660,7 @@ def branching_generate(
                 print(f"Input prompt:\n{base_prompt}\n" + "=" * 20)
 
             try:
-                outlines_text, outlines_full, hit = generate_until_any(
+                outlines_text, outlines_full, hit, _ = generate_until_any(
                     model_name,
                     tokenizer,
                     prompt=base_prompt,
@@ -604,16 +727,33 @@ def branching_generate(
                     )
                 )
             branches_gen = {}
+            branches_hit_longest_limit = {}
+            longest_thread_tokens_before_round = _get_longest_thread_tokens(outlines_full)
+            if args.pause_at_longest_thread_tokens is not None and verbose:
+                print(
+                    colored(
+                        "Longest-thread pause control enabled: "
+                        f"{longest_thread_tokens_before_round}/"
+                        f"{args.pause_at_longest_thread_tokens} tokens before branching.",
+                        "blue",
+                    )
+                )
 
             try:
                 futures = {
-                    executor.submit(_generate_branch, outlines_full, num): num
+                    executor.submit(
+                        _generate_branch,
+                        outlines_full,
+                        num,
+                        longest_thread_tokens_before_round,
+                    ): num
                     for num in outline_nums
                 }
                 for future in concurrent.futures.as_completed(futures):
                     num = futures[future]
-                    branch_gen = future.result()
+                    branch_gen, hit_longest_limit = future.result()
                     branches_gen[num] = branch_gen
+                    branches_hit_longest_limit[num] = hit_longest_limit
                     if verbose:
                         print(
                             colored(
@@ -639,6 +779,7 @@ def branching_generate(
                 )
             merged = outlines_full
             end_seq = False
+            paused_by_longest_thread_limit = False
             for i, num in enumerate(outline_nums):
                 branch_gen = branches_gen[num]
                 # We extract just the generated part for the final composition
@@ -648,7 +789,10 @@ def branching_generate(
                     print(
                         f"WARNING: Thread content does not end with {thread_end}: {thread_content=}"
                     )
-                    end_seq = True
+                    if branches_hit_longest_limit.get(num, False):
+                        paused_by_longest_thread_limit = True
+                    else:
+                        end_seq = True
                     thread_content += "</Thread>"
                 # assert thread_content.endswith(thread_end), f"Thread content does not end with {thread_end}: {thread_content}"
                 assert not thread_content.endswith(
@@ -677,6 +821,44 @@ def branching_generate(
                         "green",
                     )
                 )
+            if args.pause_at_longest_thread_tokens is not None:
+                longest_thread_tokens_after_round = _get_longest_thread_tokens(merged)
+                if verbose:
+                    print(
+                        colored(
+                            "Longest thread tokens after merge: "
+                            f"{longest_thread_tokens_after_round}/"
+                            f"{args.pause_at_longest_thread_tokens}",
+                            "blue",
+                        )
+                    )
+                if (
+                    longest_thread_tokens_after_round
+                    >= args.pause_at_longest_thread_tokens
+                ):
+                    paused_by_longest_thread_limit = True
+                    if verbose:
+                        print(
+                            colored(
+                                "Pause threshold reached by longest thread. Appending </think> and continuing generation.",
+                                "yellow",
+                            )
+                        )
+                    merged = _append_think_close_if_missing(merged)
+                    return _continue_until_normal_stop(merged)
+
+            if paused_by_longest_thread_limit:
+                if verbose:
+                    print(
+                        colored(
+                            "Branch paused by longest-thread limit. Appending </think> and continuing generation.",
+                            "yellow",
+                        )
+                    )
+                merged = _append_think_close_if_missing(merged)
+                return _continue_until_normal_stop(merged)
+
+            if verbose:
                 print(
                     colored(
                         "--- Loop will now continue with the merged text as the new base_prompt ---",

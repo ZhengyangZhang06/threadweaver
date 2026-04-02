@@ -53,6 +53,19 @@ class RewardConfig:
     # type: linear/cosine/tanh
     acceleration_ratio_curve: str = "linear"
 
+    # Multiplicative parallelism rewards:
+    # reward = existing_reward * (
+    #   1 + beta1 * f((subtask_ratio - mu) / sigma)
+    #     + beta2 * f((trial_ratio - mu) / sigma)
+    # )
+    # f supports: "linear", "sigmoid"
+    subtask_trial_reward_enabled: bool = False
+    subtask_trial_reward_fn: str = "linear"
+    subtask_trial_norm_mu: float = 0.0
+    subtask_trial_norm_sigma: float = 1.0
+    subtask_reward_beta: float = 0.0
+    trial_reward_beta: float = 0.0
+
     # If enabled, the reward will be -parallel_format_error_reward or -parallel_format_error_v2_reward if the trajectory is ill-formatted
     parallel_format_error_reward_enabled: bool = False
     parallel_format_error_reward: float = -1.0

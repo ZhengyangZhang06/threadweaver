@@ -116,6 +116,7 @@ def add_and_init_special_tokens(model, tokenizer, new_special_tokens: Optional[L
         new_special_tokens = [
             "<Think>", "</Think>", "<Parallel>", "</Parallel>",
             "<Outlines>", "</Outlines>", "<Outline>", "</Outline>",
+            "<Trial>", "</Trial>", "<Subtask>", "</Subtask>",
             "<Thread>", "</Thread>", "<Conclusion>", "</Conclusion>"
         ]
     

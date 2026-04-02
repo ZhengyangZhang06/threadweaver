@@ -14,9 +14,19 @@ TAG_TOKEN_IDS = {
     'thread_end': '</Thread>',
     'outlines_start': '<Outlines>',
     'outlines_end': '</Outlines>',
+    'trial_start': '<Trial>',
+    'trial_end': '</Trial>',
+    'subtask_start': '<Subtask>',
+    'subtask_end': '</Subtask>',
     'conclusion_start': '<Conclusion>',
     'conclusion_end': '</Conclusion>',
 }
+
+def _get_single_token_id(tokenizer, token: str) -> Optional[int]:
+    token_ids = tokenizer.encode(token, add_special_tokens=False)
+    if len(token_ids) != 1:
+        return None
+    return token_ids[0]
 
 def _find_closing_tag_pos_tokenized(
     token_ids: List[int], open_id: int, close_id: int, start_idx: int
@@ -226,31 +236,32 @@ class PrefixTreeDataCollatorForCompletionOnlyLM(trl.DataCollatorForCompletionOnl
         self.max_length = max_length
 
         # Define tags and get their corresponding token IDs
-        TAG_TOKENS = {
-            'Parallel': ('<Parallel>', '</Parallel>'),
-            'Thread': ('<Thread>', '</Thread>'),
-            'Outlines': ('<Outlines>', '</Outlines>'),
-            'Outline': ('<Outline>', '</Outline>'),
-            'Conclusion': ('<Conclusion>', '</Conclusion>'),
+        TAG_TOKEN_ALIASES = {
+            'Parallel': [('<Parallel>', '</Parallel>')],
+            'Thread': [('<Thread>', '</Thread>')],
+            'Outlines': [('<Outlines>', '</Outlines>')],
+            'Outline': [('<Outline>', '</Outline>'), ('<Trial>', '</Trial>'), ('<Subtask>', '</Subtask>')],
+            'Conclusion': [('<Conclusion>', '</Conclusion>')],
         }
+        tag_ids: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+        for name, aliases in TAG_TOKEN_ALIASES.items():
+            for start_token, end_token in aliases:
+                start_id = _get_single_token_id(self.tokenizer, start_token)
+                end_id = _get_single_token_id(self.tokenizer, end_token)
+                if start_id is not None and end_id is not None:
+                    tag_ids[name].append((start_id, end_id))
 
-        TAG_IDS = {
-            name: tuple(self.tokenizer.convert_tokens_to_ids(pair))
-            for name, pair in TAG_TOKENS.items()
-        }
+        assert tag_ids['Parallel'], "Parallel start/end token IDs must be defined."
+        assert tag_ids['Thread'], "Thread start/end token IDs must be defined."
 
         # Inverse mapping from a start token ID to its tag name and end ID
-        self.START_ID_TO_TAG_INFO = {
-            v[0]: (k, v[1]) for k, v in TAG_IDS.items()
-        }
+        self.START_ID_TO_TAG_INFO = {}
+        for name, id_pairs in tag_ids.items():
+            for start_id, end_id in id_pairs:
+                self.START_ID_TO_TAG_INFO[start_id] = (name, end_id)
 
-        self.parallel_start_id, self.parallel_end_id = TAG_IDS['Parallel']
-        self.thread_start_id, self.thread_end_id = TAG_IDS['Thread']
-
-        assert self.parallel_start_id is not None, "Parallel start ID must be defined."
-        assert self.parallel_end_id is not None, "Parallel end ID must be defined."
-        assert self.thread_start_id is not None, "Thread start ID must be defined."
-        assert self.thread_end_id is not None, "Thread end ID must be defined."
+        self.parallel_start_id, self.parallel_end_id = tag_ids['Parallel'][0]
+        self.thread_start_id, self.thread_end_id = tag_ids['Thread'][0]
 
         # print(f"Thread Start ID: {self.thread_start_id}, Thread End ID: {self.thread_end_id}")
         # print(f"Parallel Start ID: {self.parallel_start_id}, Parallel End ID: {self.parallel_end_id}")

@@ -452,21 +452,28 @@ def grade_answer_verl(solution_str, ground_truth):
 # Parallel Stats Computation (from math_rewardv2.py)
 # ============================================================================
 
-special_tokens = {
+REQUIRED_SPECIAL_TOKENS = {
     "<Parallel>",
     "</Parallel>",
+    "<Thread>",
+    "</Thread>",
+}
+
+OPTIONAL_SPECIAL_TOKENS = {
     "<Outlines>",
     "</Outlines>",
     "<Outline>",
     "</Outline>",
-    "<Thread>",
-    "</Thread>",
+    "<Trial>",
+    "</Trial>",
+    "<Subtask>",
+    "</Subtask>",
     "<Conclusion>",
     "</Conclusion>",
 }
 
 
-def get_token_id(tokenizer, token: str) -> int:
+def get_token_id(tokenizer, token: str, required: bool = True) -> Optional[int]:
     """Helper to get a single token ID for a special token string."""
     token_ids = tokenizer.encode(token, add_special_tokens=False)
     if len(token_ids) == 1:
@@ -481,14 +488,23 @@ def get_token_id(tokenizer, token: str) -> int:
     if len(token_ids) == 1:
         return token_ids[0]
 
-    raise ValueError(f"Expected single token ID for '{token}', got {token_ids} even after stripping </>")
+    if required:
+        raise ValueError(f"Expected single token ID for '{token}', got {token_ids} even after stripping </>")
+
+    return None
 
 
 def get_special_token_ids(tokenizer):
     special_token_ids = {}
-    for token in special_tokens:
-        token_id = get_token_id(tokenizer, token)
+    for token in REQUIRED_SPECIAL_TOKENS:
+        token_id = get_token_id(tokenizer, token, required=True)
         special_token_ids[token] = token_id
+
+    for token in OPTIONAL_SPECIAL_TOKENS:
+        token_id = get_token_id(tokenizer, token, required=False)
+        if token_id is not None:
+            special_token_ids[token] = token_id
+
     return special_token_ids
 
 

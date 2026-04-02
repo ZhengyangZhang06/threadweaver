@@ -1,5 +1,6 @@
 from functools import partial
 from math import isnan
+import math
 import os
 import re
 from typing import Any, List, Dict, Union, Optional
@@ -27,20 +28,27 @@ from deepscaler.rewards.math_utils.utils import (
     grade_answer_sympy,
 )
 
-special_tokens = {
+REQUIRED_SPECIAL_TOKENS = {
     "<Parallel>",
     "</Parallel>",
+    "<Thread>",
+    "</Thread>",
+}
+
+OPTIONAL_SPECIAL_TOKENS = {
     "<Outlines>",
     "</Outlines>",
     "<Outline>",
     "</Outline>",
-    "<Thread>",
-    "</Thread>",
+    "<Trial>",
+    "</Trial>",
+    "<Subtask>",
+    "</Subtask>",
     "<Conclusion>",
     "</Conclusion>",
 }
 
-def get_token_id(tokenizer: AutoTokenizer, token: str) -> int:
+def get_token_id(tokenizer: AutoTokenizer, token: str, required: bool = True) -> Optional[int]:
     """Helper to get a single token ID for a special token string."""
     token_ids = tokenizer.encode(token, add_special_tokens=False)
     if len(token_ids) == 1:
@@ -55,13 +63,22 @@ def get_token_id(tokenizer: AutoTokenizer, token: str) -> int:
     if len(token_ids) == 1:
         return token_ids[0]
 
-    raise ValueError(f"Expected single token ID for '{token}', got {token_ids} even after stripping </>")
+    if required:
+        raise ValueError(f"Expected single token ID for '{token}', got {token_ids} even after stripping </>")
+
+    return None
 
 def get_special_token_ids(tokenizer: PreTrainedTokenizerBase):
     special_token_ids = {}
-    for token in special_tokens:
-        token_id = get_token_id(tokenizer, token)
+    for token in REQUIRED_SPECIAL_TOKENS:
+        token_id = get_token_id(tokenizer, token, required=True)
         special_token_ids[token] = token_id
+
+    for token in OPTIONAL_SPECIAL_TOKENS:
+        token_id = get_token_id(tokenizer, token, required=False)
+        if token_id is not None:
+            special_token_ids[token] = token_id
+
     return special_token_ids
 
 
@@ -79,6 +96,10 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
     pid_end     = special_token_ids["</Parallel>"]
     thread_start  = special_token_ids["<Thread>"]
     thread_end    = special_token_ids["</Thread>"]
+    outlines_start = special_token_ids.get("<Outlines>")
+    outlines_end = special_token_ids.get("</Outlines>")
+    subtask_start = special_token_ids.get("<Subtask>")
+    trial_start = special_token_ids.get("<Trial>")
 
     # Totals for core reward logic
     non_block_seq = 0                     # counted outside any <Parallel> and for boundary tokens
@@ -97,6 +118,13 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
     parallel_count = 0
     num_blocks = 0
     thread_counts_per_block: List[int] = [] # Collect thread counts for each block
+    subtask_tokens = 0
+    trial_tokens = 0
+
+    # Stage type tracking based on outline tags in each <Parallel> block
+    in_outlines = False
+    blk_has_subtask_outline = False
+    blk_has_trial_outline = False
 
     for tok in model_response_token_ids:
         if not in_parallel:
@@ -109,9 +137,12 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
                 # Start a new block (the <Parallel> token itself is already counted above)
                 in_parallel = True
                 in_thread = False
+                in_outlines = False
                 blk_seq = 0
                 blk_threads = []
                 cur_thread_len = 0
+                blk_has_subtask_outline = False
+                blk_has_trial_outline = False
             # Continue to next token
             continue
 
@@ -126,6 +157,11 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
             # Update metrics for parallel blocks
             num_blocks += 1
             thread_counts_per_block.append(len(blk_threads))
+            thread_tokens_in_block = sum(blk_threads)
+            if blk_has_subtask_outline and not blk_has_trial_outline:
+                subtask_tokens += thread_tokens_in_block
+            elif blk_has_trial_outline and not blk_has_subtask_outline:
+                trial_tokens += thread_tokens_in_block
 
             # Count the </Parallel> token as non-block sequential
             non_block_seq += 1
@@ -133,8 +169,22 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
             # Reset block state
             in_parallel = False
             in_thread = False
+            in_outlines = False
             # blk_seq, blk_threads, cur_thread_len are reset on next block start
             continue
+
+        # Track outline region and stage type markers.
+        # Rule: classify a <Parallel> block by its <Outlines> content.
+        # If outline contains <Subtask>, all thread-content tokens in this block
+        # are subtask tokens; similarly for <Trial>.
+        if not in_thread and outlines_start is not None and tok == outlines_start:
+            in_outlines = True
+        elif not in_thread and outlines_end is not None and tok == outlines_end:
+            in_outlines = False
+        elif in_outlines and subtask_start is not None and tok == subtask_start:
+            blk_has_subtask_outline = True
+        elif in_outlines and trial_start is not None and tok == trial_start:
+            blk_has_trial_outline = True
 
         # Still inside a block; handle threads and literals
         if tok == thread_start:
@@ -184,6 +234,11 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
         # Update metrics for parallel blocks
         num_blocks += 1
         thread_counts_per_block.append(len(blk_threads))
+        thread_tokens_in_block = sum(blk_threads)
+        if blk_has_subtask_outline and not blk_has_trial_outline:
+            subtask_tokens += thread_tokens_in_block
+        elif blk_has_trial_outline and not blk_has_subtask_outline:
+            trial_tokens += thread_tokens_in_block
 
         # No </Parallel> token to count at EOF
 
@@ -201,10 +256,17 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
     num_tokens_in_the_longest_thread = non_block_seq + blocks_par_total
     acceleration_ratio = (1 - num_tokens_in_the_longest_thread / total_num_tokens) if total_num_tokens > 0 else 0.0
 
+    subtask_ratio = (subtask_tokens / total_num_tokens) if total_num_tokens > 0 else 0.0
+    trial_ratio = (trial_tokens / total_num_tokens) if total_num_tokens > 0 else 0.0
+
     return {
         # Core metrics for reward calculation
         "total_num_tokens": total_num_tokens,
         "num_tokens_in_the_longest_thread": num_tokens_in_the_longest_thread,
+        "num_subtask_tokens": subtask_tokens,
+        "num_trial_tokens": trial_tokens,
+        "subtask_ratio": subtask_ratio,
+        "trial_ratio": trial_ratio,
         # Detailed metrics for analysis
         "with_parallel": with_parallel,
         "parallel_count": parallel_count,
@@ -216,6 +278,19 @@ def get_parallel_stats(model_response_token_ids: List[int], special_token_ids: D
         "parallel_format_correct": True,
         "parallel_format_correct_v2": True,
     }
+def _apply_reward_transform(x: float, fn_type: str) -> float:
+    """Apply transform f(x) used by multiplicative reward terms."""
+    if fn_type == "linear":
+        return x
+    if fn_type == "sigmoid":
+        # numerically stable enough for expected z-score range
+        return 1.0 / (1.0 + math.exp(-x))
+    raise ValueError(f"Unsupported reward transform fn_type: {fn_type}")
+
+
+def _safe_normalize(value: float, mu: float, sigma: float) -> float:
+    sigma_safe = sigma if abs(sigma) > 1e-8 else 1.0
+    return (value - mu) / sigma_safe
 
 def compute_ratio_reward(
     model_response: str,
@@ -274,9 +349,34 @@ def calculate_reward(config: RewardConfig, model_response: str, correct_lenient:
     reward += acceleration_reward
     reward += parallel_reward
 
+    reward_before_subtask_trial = reward
+    subtask_trial_multiplier = 1.0
+    subtask_term = 0.0
+    trial_term = 0.0
+
+    if config.subtask_trial_reward_enabled:
+        fn_type = config.subtask_trial_reward_fn
+        sub_ratio = float(parallel_stats.get("subtask_ratio", 0.0))
+        trial_ratio = float(parallel_stats.get("trial_ratio", 0.0))
+
+        sub_z = _safe_normalize(sub_ratio, config.subtask_trial_norm_mu, config.subtask_trial_norm_sigma)
+        trial_z = _safe_normalize(trial_ratio, config.subtask_trial_norm_mu, config.subtask_trial_norm_sigma)
+
+        sub_f = _apply_reward_transform(sub_z, fn_type)
+        trial_f = _apply_reward_transform(trial_z, fn_type)
+
+        subtask_term = config.subtask_reward_beta * sub_f
+        trial_term = config.trial_reward_beta * trial_f
+        subtask_trial_multiplier = 1.0 + subtask_term + trial_term
+        reward = reward * subtask_trial_multiplier
+
     extra_info.update({
         "acceleration_reward": acceleration_reward,
         "parallel_reward": parallel_reward,
+        "reward_before_subtask_trial": reward_before_subtask_trial,
+        "subtask_trial_multiplier": subtask_trial_multiplier,
+        "subtask_reward_term": subtask_term,
+        "trial_reward_term": trial_term,
     })
 
     return reward, extra_info

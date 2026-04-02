@@ -39,7 +39,7 @@ class GenerationState(Enum):
 class ParallelBranchingController:
     """Orchestrate seq→par→seq rollouts on top of the existing vLLM server."""
 
-    OUTLINE_PATTERN = re.compile(r"<Outline>\s*([0-9]+(?:\.[0-9]+)*)\s*:")
+    OUTLINE_PATTERN = re.compile(r"<(?:Outline|Trial|Subtask)>\s*([0-9]+(?:\.[0-9]+)*)\s*:")
 
     def __init__(
         self,
@@ -83,20 +83,37 @@ class ParallelBranchingController:
         self.eos_seen = False
         self.block_counter = 0
 
-    def _build_special_token_map(self) -> Dict[str, int]:
+    def _build_special_token_map(self) -> Dict[str, Any]:
         def _get_id(token: str) -> int:
             token_ids = self.tokenizer.encode(token, add_special_tokens=False)
             if len(token_ids) != 1:
                 raise ValueError(f"Special token '{token}' must map to exactly one token id; got {token_ids}")
             return token_ids[0]
 
+        def _get_available_ids(tokens: List[str]) -> List[Tuple[int, str]]:
+            results: List[Tuple[int, str]] = []
+            for token in tokens:
+                token_ids = self.tokenizer.encode(token, add_special_tokens=False)
+                if len(token_ids) == 1:
+                    results.append((token_ids[0], token))
+            return results
+
         eos_id = self.tokenizer.eos_token_id
         if eos_id is None:
             raise ValueError("Tokenizer must define eos_token_id for parallel branching mode")
 
+        outlines_start_pairs = _get_available_ids(["<Outlines>"])
+        outlines_end_pairs = _get_available_ids(["</Outlines>"])
+        if not outlines_start_pairs:
+            raise ValueError("<Outlines> does not map to a single token id.")
+        if not outlines_end_pairs:
+            raise ValueError("</Outlines> does not map to a single token id.")
+
         return {
-            "outlines_start_id": _get_id("<Outlines>"),
-            "outlines_end_id": _get_id("</Outlines>"),
+            "outlines_start_ids": [pair[0] for pair in outlines_start_pairs],
+            "outlines_start_tokens": [pair[1] for pair in outlines_start_pairs],
+            "outlines_end_ids": [pair[0] for pair in outlines_end_pairs],
+            "outlines_end_tokens": [pair[1] for pair in outlines_end_pairs],
             "thread_end_id": _get_id("</Thread>"),
             "eos_id": eos_id,
         }
@@ -165,7 +182,7 @@ class ParallelBranchingController:
         )
 
     async def _sequential_step(self) -> None:
-        stop_ids = [self.special_tokens["outlines_end_id"], self.special_tokens["eos_id"]]
+        stop_ids = list(self.special_tokens["outlines_end_ids"]) + [self.special_tokens["eos_id"]]
         print_debug(
             f"[Branching] sequential step | stop_ids={stop_ids} | ctx_len={len(self.current_tokens)}"
         )
@@ -185,7 +202,7 @@ class ParallelBranchingController:
             f"[Branching] sequential produced {len(tokens)} tokens | finish_reason={output.finish_reason} | matched_stop={output.matched_stop}"
         )
 
-        if self.special_tokens["outlines_end_id"] in tokens:
+        if any(stop_id in tokens for stop_id in self.special_tokens["outlines_end_ids"]):
             outline_nums = self._extract_outline_numbers()
             if outline_nums:
                 self.outline_nums = outline_nums
@@ -366,11 +383,13 @@ class ParallelBranchingController:
         return len(self.expanded_prompt_ids) - 1
 
     def _extract_outline_numbers(self) -> List[str]:
-        outlines_start_id = self.special_tokens["outlines_start_id"]
-        try:
-            last_outlines_start = len(self.current_tokens) - 1 - self.current_tokens[::-1].index(outlines_start_id)
-        except ValueError:
+        start_positions = [
+            idx for idx, token_id in enumerate(self.current_tokens)
+            if token_id in self.special_tokens["outlines_start_ids"]
+        ]
+        if not start_positions:
             return []
+        last_outlines_start = start_positions[-1]
 
         outlines_tokens = self.current_tokens[last_outlines_start:]
         outlines_text = self.tokenizer.decode(outlines_tokens)
