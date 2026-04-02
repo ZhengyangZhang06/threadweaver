@@ -441,6 +441,8 @@ progress_bar = tqdm(total=total_ops, desc="Generating text")
 # Let's use text_completion to ensure the templates are right
 text_completion = True  # Set to True for text completion, False for chat completion
 
+THINK_END_PATTERN = re.compile(r"</think>", re.IGNORECASE)
+
 
 def apply_chat_template(messages):
     assert (
@@ -484,7 +486,120 @@ def compute_parallel_stats_safe(response_token_ids):
     return get_parallel_stats(response_token_ids, special_token_ids)
 
 
-def generate_single_sample(prompt_token_ids, messages, stop_tokens_ids):
+def _longest_thread_tokens_for_text(text: str) -> int:
+    if not text:
+        return 0
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    stats = compute_parallel_stats_safe(token_ids)
+    return stats["num_tokens_in_the_longest_thread"]
+
+
+def _truncate_to_longest_thread_budget(text: str, budget: int) -> str:
+    if budget <= 0 or not text:
+        return ""
+
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    if not token_ids:
+        return ""
+
+    if compute_parallel_stats_safe(token_ids)["num_tokens_in_the_longest_thread"] <= budget:
+        return text
+
+    lo, hi = 0, len(token_ids)
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        prefix_ids = token_ids[:mid]
+        longest = compute_parallel_stats_safe(prefix_ids)["num_tokens_in_the_longest_thread"]
+        if longest <= budget:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    return tokenizer.decode(
+        token_ids[:best],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+
+
+def _continue_generation_from_prompt(prompt_text: str, stop_tokens_ids: List[int]) -> str:
+    current_text = prompt_text
+    while True:
+        prompt_token_ids = tokenizer.encode(current_text, add_special_tokens=False)
+        remaining_context_tokens = max_context_length - len(prompt_token_ids) - 1
+        if remaining_context_tokens <= 0:
+            return current_text
+
+        completion = client.completions.create(
+            model=model_name,
+            prompt=prompt_token_ids,
+            max_tokens=remaining_context_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            extra_body={
+                "add_special_tokens": False,
+                "skip_special_tokens": False,
+                "stop_tokens_ids": stop_tokens_ids,
+            },
+        )
+
+        current_text += completion.choices[0].text
+        finish_reason = completion.choices[0].finish_reason
+        if finish_reason in {"stop", "length"}:
+            return current_text
+        raise ValueError(f"Unexpected finish reason during continuation: {finish_reason}")
+
+
+def _apply_hard_prethink_limit(
+    prompt_text: str,
+    generated_text: str,
+    continue_stop_tokens_ids: List[int],
+) -> str:
+    if args.pause_at_longest_thread_tokens is None:
+        return generated_text
+
+    limit = args.pause_at_longest_thread_tokens
+    match = THINK_END_PATTERN.search(generated_text)
+    if match:
+        pre_think = generated_text[:match.start()]
+        suffix_from_close = generated_text[match.start():]
+    else:
+        pre_think = generated_text
+        suffix_from_close = ""
+
+    capped_pre_think = _truncate_to_longest_thread_budget(pre_think, limit)
+    pre_think_tokens = _longest_thread_tokens_for_text(capped_pre_think)
+    truncated = capped_pre_think != pre_think
+
+    if truncated and suffix_from_close:
+        return capped_pre_think + suffix_from_close
+
+    if truncated and not suffix_from_close:
+        rebuilt = capped_pre_think
+        if not rebuilt.endswith("\n"):
+            rebuilt += "\n"
+        rebuilt += "</think>\n"
+        full_text = _continue_generation_from_prompt(
+            prompt_text + rebuilt, continue_stop_tokens_ids
+        )
+        return full_text[len(prompt_text):] if full_text.startswith(prompt_text) else full_text
+
+    if not suffix_from_close and pre_think_tokens >= limit:
+        rebuilt = generated_text
+        if not rebuilt.endswith("\n"):
+            rebuilt += "\n"
+        rebuilt += "</think>\n"
+        full_text = _continue_generation_from_prompt(
+            prompt_text + rebuilt, continue_stop_tokens_ids
+        )
+        return full_text[len(prompt_text):] if full_text.startswith(prompt_text) else full_text
+
+    return generated_text
+
+
+def generate_single_sample(prompt_token_ids, prompt, messages, stop_tokens_ids):
     if text_completion:
         # text completion
         completion = client.completions.create(
@@ -499,7 +614,12 @@ def generate_single_sample(prompt_token_ids, messages, stop_tokens_ids):
                 "stop_tokens_ids": stop_tokens_ids,
             },
         )
-        return completion.choices[0].text
+        result_text = completion.choices[0].text
+        return _apply_hard_prethink_limit(
+            prompt_text=prompt,
+            generated_text=result_text,
+            continue_stop_tokens_ids=stop_tokens_ids,
+        )
     else:
         # chat completion
         completion = client.chat.completions.create(
@@ -514,7 +634,12 @@ def generate_single_sample(prompt_token_ids, messages, stop_tokens_ids):
                 "stop_tokens_ids": stop_tokens_ids,
             },
         )
-        return completion.choices[0].message.content
+        result_text = completion.choices[0].message.content
+        return _apply_hard_prethink_limit(
+            prompt_text=prompt,
+            generated_text=result_text,
+            continue_stop_tokens_ids=stop_tokens_ids,
+        )
 
 
 # This is for structured generation (that parses the output).
@@ -645,7 +770,7 @@ def branching_generate(
                         "yellow",
                     )
                 )
-            return thread_end
+            return thread_end, False
 
         per_branch_max_new_tokens = min(
             sampling_params["max_new_tokens"], remaining_context_tokens
@@ -665,7 +790,7 @@ def branching_generate(
                             "yellow",
                         )
                     )
-                return thread_end
+                return thread_end, True
             per_branch_max_new_tokens = min(
                 per_branch_max_new_tokens, remaining_for_longest
             )
@@ -937,7 +1062,7 @@ def generate_single_sample_branching(prompt_token_ids, base_prompt, stop_tokens_
     ), "Stop tokens are not supported for branching generation."
 
     # base_prompt = apply_chat_template(messages)
-    gen_text = branching_generate(
+    full_text = branching_generate(
         model_name,
         tokenizer,
         base_prompt=base_prompt,
@@ -949,7 +1074,15 @@ def generate_single_sample_branching(prompt_token_ids, base_prompt, stop_tokens_
         verbose=args.verbose > 2,
     )
 
-    return gen_text
+    generated_text = (
+        full_text[len(base_prompt):] if full_text.startswith(base_prompt) else full_text
+    )
+    continuation_stop_tokens = [] if args.no_stop_at_eos else [eos_id]
+    return _apply_hard_prethink_limit(
+        prompt_text=base_prompt,
+        generated_text=generated_text,
+        continue_stop_tokens_ids=continuation_stop_tokens,
+    )
 
 
 def process_sample(message_idx, sample_idx, jsonl_file_path, lock):
@@ -973,7 +1106,9 @@ def process_sample(message_idx, sample_idx, jsonl_file_path, lock):
             prompt_token_ids, base_prompt=prompt, stop_tokens_ids=stop_tokens_ids
         )
     else:
-        result = generate_single_sample(prompt_token_ids, messages, stop_tokens_ids)
+        result = generate_single_sample(
+            prompt_token_ids, prompt, messages, stop_tokens_ids
+        )
 
     # Write to JSONL file with lock
     jsonl_entry = {
