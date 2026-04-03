@@ -125,7 +125,7 @@ import sys
 from datetime import datetime
 
 checkpoint_path = sys.argv[1]
-token_limits = [4096, 8192, 16384, 24576, 32768, 40960]
+token_limits = [0, 2048,4096, 8192, 16384, 24576, 32768, 40960]
 target_model_path = os.path.normpath(os.path.abspath(os.path.expanduser(checkpoint_path)))
 
 abs_model = os.path.abspath(os.path.expanduser(checkpoint_path))
