@@ -343,9 +343,6 @@ def calculate_reward(config: RewardConfig, model_response: str, correct_lenient:
                 ratio_clip_max=config.acceleration_ratio_clip_max,
             )
 
-        if config.parallel_rewardv2 > 0. and parallel_stats["with_parallel"]:
-            parallel_reward = config.parallel_rewardv2
-
     reward += acceleration_reward
     reward += parallel_reward
 
@@ -379,6 +376,12 @@ class RewardMathFnv2(RewardFn):
         assert not self.config.parallel_format_error_reward_enabled, "parallel_format_error_reward_enabled is deprecated"
         assert not self.config.parallel_format_error_v2_reward_enabled, "parallel_format_error_v2_reward_enabled is deprecated"
 
+        if self.config.parallel_rewardv2 != 0.0:
+            print(
+                "WARNING: parallel_rewardv2 is deprecated and ignored. "
+                "Parallel bonuses are computed additively in the reward manager."
+            )
+
         if (
             self.config.subtask_trial_reward_enabled
             or self.config.subtask_reward_beta != 0.0
@@ -387,7 +390,7 @@ class RewardMathFnv2(RewardFn):
         ):
             print(
                 "WARNING: subtask_trial_* shaping knobs are deprecated and ignored. "
-                "Use group-wise shaping knobs in reward_manager config: "
+                "Use additive parallel bonus knobs in reward_manager config: "
                 "{subtask_beta, trial_beta, parallel_ratio_beta, latency_alpha}."
             )
 

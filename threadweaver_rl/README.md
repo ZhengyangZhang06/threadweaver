@@ -23,18 +23,30 @@ The reward function computes rewards based on three components:
 
 1. **Correctness Reward** (`r_correct`):
    - +1.0 for correct answers
-   - 0.0 for incorrect answers
+   - -1.0 for incorrect answers by default
    - Uses symbolic math verification and specialized graders
 
 2. **Acceleration Ratio Reward** (`r_accel`):
    - Measures efficiency of parallel reasoning
-   - Formula: `r_accel = factor * min(acceleration_ratio - 1.0, clip_max)`
-   - Where acceleration ratio = sequential cost / parallel cost
+   - Formula: `r_accel = acceleration_ratio_reward * acceleration_ratio_reward_factor * min(acceleration_ratio, clip_max)`
+   - Where `acceleration_ratio = 1 - critical_path_tokens / total_num_tokens`
    - Default factor: 0.5, clip_max: 0.2
 
-3. **Combined Reward**:
+3. **Parallel Reward Bonus** (`r_parallel`):
+   - Computed from grouped z-scores within each GRPO `uid` group
+   - Formula:
    ```
-   reward = r_correct + r_accel
+   r_parallel =
+       subtask_beta * z(subtask_ratio)
+     + trial_beta * z(trial_ratio)
+     + parallel_ratio_beta * z(parallel_ratio)
+     + latency_alpha * z(acceleration_ratio)
+   ```
+   - Applied only when the answer is correct
+
+4. **Combined Reward**:
+   ```
+   reward = r_correct + r_accel + r_parallel
    ```
 
 The reward function also tracks detailed statistics about parallel structure, thread counts, and token usage.

@@ -36,7 +36,8 @@ class RewardConfig:
     # If enabled, the parallel count will be clipped to this value before the reward calculation
     parallel_clip_max: int = 100000
 
-    # Only used in version "v2": if there is parallel, add this reward
+    # Deprecated flat parallel bonus. The current v2 path computes additive
+    # parallel bonuses in the reward manager via grouped z-scores.
     parallel_rewardv2: float = 0.
 
     # If parallel is not working, parallel ratio reward is -parallel_ratio_reward
@@ -53,14 +54,14 @@ class RewardConfig:
     # type: linear/cosine/tanh
     acceleration_ratio_curve: str = "linear"
 
-    # GRPO group-wise reward shaping coefficients:
-    # reward_i = base_reward_i * (
-    #   1
-    #   + beta_1 * z(subtask_ratio_i)
+    # Additive grouped parallel bonus coefficients:
+    # reward_i = base_reward_i + (
+    #   beta_1 * z(subtask_ratio_i)
     #   + beta_2 * z(trial_ratio_i)
     #   + beta_3 * z(parallel_ratio_i)
     #   + alpha  * z(acceleration_ratio_i)
     # )
+    # The additive bonus is applied only to correct trajectories.
     # z(.) is group-wise normalization computed within each GRPO group.
     subtask_beta: float = 0.0
     trial_beta: float = 0.0

@@ -93,18 +93,20 @@ config:
   acceleration_ratio_clip_max: 1.0
   acceleration_ratio_curve: linear
 
-  # GRPO group-wise shaping (mu/std are computed within each group by `uid`):
-  # reward_i = base_reward_i * (
-  #   1
-  #   + subtask_beta * z(subtask_ratio_i)
+  # Additive parallel bonus weights (mu/std are computed within each group by `uid`):
+  # reward_i = base_reward_i + parallel_rewardv2_bonus_i
+  # parallel_rewardv2_bonus_i = (
+  #   subtask_beta * z(subtask_ratio_i)
   #   + trial_beta * z(trial_ratio_i)
   #   + parallel_ratio_beta * z(parallel_ratio_i)
   #   + latency_alpha * z(acceleration_ratio_i)
   # )
+  # The additive parallel bonus is applied only to correct samples.
   subtask_beta: 0.0
   trial_beta: 0.0
   parallel_ratio_beta: 0.4
   latency_alpha: 0.0
+  # Numerical stability epsilon for per-group z-score normalization.
   group_shaping_eps: 1.0e-8
 
   parallel_format_error_reward_enabled: False

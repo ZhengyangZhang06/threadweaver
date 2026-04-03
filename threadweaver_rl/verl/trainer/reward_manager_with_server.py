@@ -81,7 +81,7 @@ def _groupwise_zscore(values: np.ndarray, group_ids: list[str], eps: float) -> n
     return z
 
 
-def _apply_groupwise_grpo_shaping(
+def _apply_groupwise_parallel_bonus(
     scores: list[dict],
     extra_infos: list[dict],
     uid_values,
@@ -92,9 +92,6 @@ def _apply_groupwise_grpo_shaping(
     beta_3 = _cfg_float(config, "parallel_ratio_beta", _cfg_float(config, "parallel_ratio_reward_beta", 0.0))
     alpha = _cfg_float(config, "latency_alpha", 0.0)
     eps = max(1e-12, _cfg_float(config, "group_shaping_eps", 1e-8))
-
-    if abs(beta_1) + abs(beta_2) + abs(beta_3) + abs(alpha) <= 0.0:
-        return scores, extra_infos
 
     n = len(scores)
     if len(extra_infos) != n:
@@ -125,34 +122,34 @@ def _apply_groupwise_grpo_shaping(
     parallel_z = _groupwise_zscore(parallel_ratio, group_ids, eps=eps)
     latency_z = _groupwise_zscore(latency_signal, group_ids, eps=eps)
 
-    shaping_term = beta_1 * subtask_z + beta_2 * trial_z + beta_3 * parallel_z + alpha * latency_z
-    shaping_multiplier = 1.0 + shaping_term
+    parallel_bonus = beta_1 * subtask_z + beta_2 * trial_z + beta_3 * parallel_z + alpha * latency_z
 
-    shaped_scores: list[dict] = []
-    shaped_extra_infos: list[dict] = []
+    bonus_scores: list[dict] = []
+    bonus_extra_infos: list[dict] = []
     for i in range(n):
         score = scores[i] if isinstance(scores[i], dict) else {"reward": _safe_float(scores[i], 0.0), "second_reward": 0.0}
         score = dict(score)
         base_reward = _safe_float(score.get("reward", 0.0), 0.0)
-        score["reward"] = base_reward * float(shaping_multiplier[i])
-        shaped_scores.append(score)
-
         info = dict(extra_infos[i] or {})
-        info["group_shaping_beta_1"] = beta_1
-        info["group_shaping_beta_2"] = beta_2
-        info["group_shaping_beta_3"] = beta_3
-        info["group_shaping_alpha"] = alpha
-        info["group_shaping_subtask_z"] = float(subtask_z[i])
-        info["group_shaping_trial_z"] = float(trial_z[i])
-        info["group_shaping_parallel_ratio_z"] = float(parallel_z[i])
-        info["group_shaping_latency_z"] = float(latency_z[i])
-        info["group_shaping_term"] = float(shaping_term[i])
-        info["group_shaping_multiplier"] = float(shaping_multiplier[i])
-        info["reward_before_group_shaping"] = base_reward
-        info["reward_after_group_shaping"] = score["reward"]
-        shaped_extra_infos.append(info)
+        bonus_if_correct = float(parallel_bonus[i]) if bool(info.get("correct", False)) else 0.0
+        score["reward"] = base_reward + bonus_if_correct
+        bonus_scores.append(score)
 
-    return shaped_scores, shaped_extra_infos
+        info["parallel_bonus_beta_1"] = beta_1
+        info["parallel_bonus_beta_2"] = beta_2
+        info["parallel_bonus_beta_3"] = beta_3
+        info["parallel_bonus_alpha"] = alpha
+        info["parallel_bonus_subtask_z"] = float(subtask_z[i])
+        info["parallel_bonus_trial_z"] = float(trial_z[i])
+        info["parallel_bonus_parallel_ratio_z"] = float(parallel_z[i])
+        info["parallel_bonus_latency_z"] = float(latency_z[i])
+        info["parallel_rewardv2_bonus_raw"] = float(parallel_bonus[i])
+        info["parallel_rewardv2_bonus"] = bonus_if_correct
+        info["reward_before_parallel_bonus"] = base_reward
+        info["reward_after_parallel_bonus"] = score["reward"]
+        bonus_extra_infos.append(info)
+
+    return bonus_scores, bonus_extra_infos
 
 # =========================
 # Client-side Caching Setup
@@ -742,7 +739,7 @@ class RewardManagerWithServer:
         scores = [res[1] for res in results]
         extra_infos = [res[4] or {} for res in results]
         uid_values = data.non_tensor_batch.get("uid")
-        scores, extra_infos = _apply_groupwise_grpo_shaping(scores, extra_infos, uid_values, self.config)
+        scores, extra_infos = _apply_groupwise_parallel_bonus(scores, extra_infos, uid_values, self.config)
 
         # Fill reward tensor with (possibly shaped) results
         for idx, (i, _, valid_response_length, _, _) in enumerate(results):
