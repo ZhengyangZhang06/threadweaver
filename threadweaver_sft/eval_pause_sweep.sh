@@ -71,7 +71,7 @@ if [[ ! -f "${EVAL_SCRIPT}" ]]; then
   exit 1
 fi
 
-TOKEN_LIMITS=(4096 8192 16384 24576 32768 40960)
+TOKEN_LIMITS=(0 2048 4096 8192 16384 24576 32768 40960)
 DATA_TYPE="${DATA_TYPE_FROM_CLI:-${DATA_TYPE:-}}"
 if [[ -z "${DATA_TYPE}" ]]; then
   read -r -p "Enter --data-type parquet path (or dataset key): " DATA_TYPE

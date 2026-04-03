@@ -621,13 +621,23 @@ def _apply_hard_prethink_limit(
     return generated_text
 
 
+def _get_first_turn_max_tokens(prompt_token_ids: List[int]) -> int:
+    remaining_context_tokens = max_context_length - len(prompt_token_ids) - 1
+    if args.pause_at_longest_thread_tokens is None:
+        return remaining_context_tokens
+    # For the initial non-branching turn, the pause budget applies to newly
+    # generated reasoning tokens, not the existing prompt prefix.
+    return min(remaining_context_tokens, args.pause_at_longest_thread_tokens)
+
+
 def generate_single_sample(prompt_token_ids, prompt, messages, stop_tokens_ids):
+    first_turn_max_tokens = _get_first_turn_max_tokens(prompt_token_ids)
     if text_completion:
         # text completion
         completion = client.completions.create(
             model=model_name,
             prompt=prompt_token_ids,
-            max_tokens=max_context_length - len(prompt_token_ids) - 1,
+            max_tokens=first_turn_max_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
             extra_body={
@@ -647,7 +657,7 @@ def generate_single_sample(prompt_token_ids, prompt, messages, stop_tokens_ids):
         completion = client.chat.completions.create(
             model=model_name,
             messages=messages,
-            max_tokens=max_context_length - len(prompt_token_ids) - 1,
+            max_tokens=first_turn_max_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
             extra_body={
