@@ -203,10 +203,10 @@ if args.total_splits < 1:
     raise ValueError(f"total-splits ({args.total_splits}) must be at least 1")
 if (
     args.pause_at_longest_thread_tokens is not None
-    and args.pause_at_longest_thread_tokens <= 0
+    and args.pause_at_longest_thread_tokens < 0
 ):
     raise ValueError(
-        "--pause-at-longest-thread-tokens must be a positive integer when set."
+        "--pause-at-longest-thread-tokens must be a none negative integer when set."
     )
 
 openai_api_key = "EMPTY"
