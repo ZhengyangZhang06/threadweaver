@@ -150,7 +150,7 @@ parser.add_argument(
 parser.add_argument(
     "--reasoning-parallel-workers",
     type=int,
-    default=4,
+    default=32,
     help="Worker threads for parallelizing branches in branching generation. Default is 4.",
 )
 parser.add_argument(
