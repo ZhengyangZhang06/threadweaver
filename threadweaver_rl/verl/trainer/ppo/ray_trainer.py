@@ -1357,7 +1357,7 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     if return_expanded_sequences:
                         # `batch` before `_align_batch_with_generated` has unique uid
-                        batch = self._align_batch_with_generated(batch, gen_batch_output, exclude_from_base=['data_source', 'uid', 'extra_info', 'reward_model'], auto_exclude_from_base=True)
+                        batch = self._align_batch_with_generated(batch, gen_batch_output, exclude_from_base=['data_source', 'extra_info', 'reward_model'], auto_exclude_from_base=True)
                     else:
                         batch = batch.repeat(
                             repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
