@@ -66,7 +66,9 @@ reward_manager_server_workers: 64
 
 # Additional configuration dictionary forwarded to the selected reward manager.
 config:
-  # Use "v1" by default
+  # Reward version:
+  # - "v2": existing behavior (group-normalized additive bonus via reward manager).
+  # - "v2_simple": disable group-normalized bonus and use clipped simple trial bonus.
   version: "v1"
 
   correct_reward: 1.0
@@ -108,6 +110,12 @@ config:
   latency_alpha: 0.0
   # Numerical stability epsilon for per-group z-score normalization.
   group_shaping_eps: 1.0e-8
+
+  # Simple trial-ratio bonus for version == "v2_simple":
+  # reward_trial_simple = trial_ratio_simple_alpha * min(trial_ratio, trial_ratio_simple_clip_max)
+  # This bonus is applied only when the answer is correct.
+  trial_ratio_simple_alpha: 0.0
+  trial_ratio_simple_clip_max: 1.0
 
   parallel_format_error_reward_enabled: False
   parallel_format_error_reward: -1.0

@@ -64,6 +64,17 @@ def _cfg_float(config: Dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
+def _cfg_str(config: Dict[str, Any], key: str, default: str = "") -> str:
+    try:
+        if hasattr(config, "get"):
+            v = config.get(key, default)
+        else:
+            v = config[key]
+    except Exception:
+        v = default
+    return str(v) if v is not None else default
+
+
 def _groupwise_zscore(values: np.ndarray, group_ids: list[str], eps: float) -> np.ndarray:
     z = np.zeros_like(values, dtype=np.float32)
     groups: dict[str, list[int]] = {}
@@ -147,6 +158,47 @@ def _apply_groupwise_parallel_bonus(
         info["parallel_rewardv2_bonus"] = bonus_if_correct
         info["reward_before_parallel_bonus"] = base_reward
         info["reward_after_parallel_bonus"] = score["reward"]
+        bonus_extra_infos.append(info)
+
+    return bonus_scores, bonus_extra_infos
+
+
+def _apply_simple_trial_bonus(
+    scores: list[dict],
+    extra_infos: list[dict],
+    config: Dict[str, Any],
+) -> tuple[list[dict], list[dict]]:
+    alpha = _cfg_float(config, "trial_ratio_simple_alpha", 0.0)
+    clip_max = _cfg_float(config, "trial_ratio_simple_clip_max", 1.0)
+    clip_max = max(0.0, clip_max)
+
+    n = len(scores)
+    if len(extra_infos) != n:
+        extra_infos = list(extra_infos)[:n] + [{} for _ in range(max(0, n - len(extra_infos)))]
+
+    bonus_scores: list[dict] = []
+    bonus_extra_infos: list[dict] = []
+    for i in range(n):
+        score = scores[i] if isinstance(scores[i], dict) else {"reward": _safe_float(scores[i], 0.0), "second_reward": 0.0}
+        score = dict(score)
+        base_reward = _safe_float(score.get("reward", 0.0), 0.0)
+        info = dict(extra_infos[i] or {})
+        trial_ratio = _safe_float(info.get("trial_ratio", 0.0), 0.0)
+        trial_ratio_clipped = min(max(0.0, trial_ratio), clip_max)
+        simple_bonus_raw = alpha * trial_ratio_clipped
+        simple_bonus = float(simple_bonus_raw) if bool(info.get("correct", False)) else 0.0
+
+        score["reward"] = base_reward + simple_bonus
+        bonus_scores.append(score)
+
+        info["simple_trial_reward_alpha"] = alpha
+        info["simple_trial_reward_clip_max"] = clip_max
+        info["simple_trial_ratio"] = trial_ratio
+        info["simple_trial_ratio_clipped"] = float(trial_ratio_clipped)
+        info["simple_trial_reward_raw"] = float(simple_bonus_raw)
+        info["simple_trial_reward"] = float(simple_bonus)
+        info["reward_before_simple_trial_bonus"] = base_reward
+        info["reward_after_simple_trial_bonus"] = score["reward"]
         bonus_extra_infos.append(info)
 
     return bonus_scores, bonus_extra_infos
@@ -738,8 +790,12 @@ class RewardManagerWithServer:
 
         scores = [res[1] for res in results]
         extra_infos = [res[4] or {} for res in results]
-        uid_values = data.non_tensor_batch.get("uid")
-        scores, extra_infos = _apply_groupwise_parallel_bonus(scores, extra_infos, uid_values, self.config)
+        version = _cfg_str(self.config, "version", "")
+        if version == "v2_simple":
+            scores, extra_infos = _apply_simple_trial_bonus(scores, extra_infos, self.config)
+        else:
+            uid_values = data.non_tensor_batch.get("uid")
+            scores, extra_infos = _apply_groupwise_parallel_bonus(scores, extra_infos, uid_values, self.config)
 
         # Fill reward tensor with (possibly shaped) results
         for idx, (i, _, valid_response_length, _, _) in enumerate(results):

@@ -9,6 +9,9 @@ from enum import Enum
 
 @dataclass
 class RewardConfig:
+    # Supported versions:
+    # - v2: keep existing reward path with optional grouped z-score parallel bonus in reward manager.
+    # - v2_simple: disable grouped bonus, use simple clipped trial-ratio reward in reward manager.
     version: Optional[str] = None
 
     # Use LLM as ORM to evaluate correctness.
@@ -68,6 +71,12 @@ class RewardConfig:
     parallel_ratio_beta: float = 0.0
     latency_alpha: float = 0.0
     group_shaping_eps: float = 1e-8
+
+    # Simple trial-ratio bonus (for version == "v2_simple"):
+    # reward_trial_simple = trial_ratio_simple_alpha * min(trial_ratio, trial_ratio_simple_clip_max)
+    # Applied only when the trajectory is correct.
+    trial_ratio_simple_alpha: float = 0.0
+    trial_ratio_simple_clip_max: float = 1.0
 
     # Deprecated old shaping knobs (kept for backward compatibility only).
     subtask_trial_reward_enabled: bool = False

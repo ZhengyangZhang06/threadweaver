@@ -495,7 +495,8 @@ def deepscaler_reward_fn(
     """
     Dispatcher function for reward computation.
 
-    This function routes to the V2 reward implementation. V1 is deprecated.
+    This function routes to the V2 reward implementation family.
+    V1 is deprecated.
 
     Args:
         solution_str: The model's solution string
@@ -520,7 +521,7 @@ def deepscaler_reward_fn(
 
     if reward_config.version == "v1":
         raise NotImplementedError("Reward function v1 is deprecated. Please use v2.")
-    elif reward_config.version != "v2":
+    elif reward_config.version not in {"v2", "v2_simple"}:
         raise ValueError(f"Unknown reward config version: {reward_config.version}")
 
     reward_fn = RewardMathFnv2(reward_config)

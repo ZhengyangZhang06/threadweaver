@@ -39,11 +39,20 @@ server_reward_manager = _load_module("test_server_reward_manager", "verl/trainer
 
 def _cfg():
     return {
+        "version": "v2",
         "subtask_beta": 0.5,
         "trial_beta": 0.25,
         "parallel_ratio_beta": 0.75,
         "latency_alpha": 0.1,
         "group_shaping_eps": 1e-8,
+    }
+
+
+def _cfg_simple():
+    return {
+        "version": "v2_simple",
+        "trial_ratio_simple_alpha": 0.4,
+        "trial_ratio_simple_clip_max": 0.3,
     }
 
 
@@ -142,6 +151,117 @@ def test_server_and_local_parallel_bonus_helpers_match():
 
     assert local_scores == server_scores
     assert local_infos == server_infos
+
+
+def test_simple_trial_bonus_is_clipped_and_correct_only():
+    scores, extra_infos = local_reward_manager._apply_simple_trial_bonus(
+        _sample_scores(),
+        _sample_extra_infos(),
+        _cfg_simple(),
+    )
+
+    expected_bonus_0 = 0.4 * 0.3  # clipped from 0.4 to 0.3
+    expected_bonus_1 = 0.4 * 0.2
+
+    assert math.isclose(extra_infos[0]["simple_trial_reward_raw"], expected_bonus_0, abs_tol=1e-6)
+    assert math.isclose(extra_infos[0]["simple_trial_reward"], expected_bonus_0, abs_tol=1e-6)
+    assert math.isclose(extra_infos[1]["simple_trial_reward_raw"], expected_bonus_1, abs_tol=1e-6)
+    assert math.isclose(extra_infos[1]["simple_trial_reward"], expected_bonus_1, abs_tol=1e-6)
+    assert math.isclose(extra_infos[2]["simple_trial_reward_raw"], 0.4 * 0.3, abs_tol=1e-6)
+    assert math.isclose(extra_infos[2]["simple_trial_reward"], 0.0, abs_tol=1e-6)
+    assert math.isclose(extra_infos[3]["simple_trial_reward_raw"], 0.4 * 0.3, abs_tol=1e-6)
+    assert math.isclose(extra_infos[3]["simple_trial_reward"], 0.4 * 0.3, abs_tol=1e-6)
+
+    assert math.isclose(scores[0]["reward"], 1.0 + expected_bonus_0, abs_tol=1e-6)
+    assert math.isclose(scores[1]["reward"], 1.0 + expected_bonus_1, abs_tol=1e-6)
+    assert math.isclose(scores[2]["reward"], -1.0, abs_tol=1e-6)
+    assert math.isclose(scores[3]["reward"], 2.0 + 0.4 * 0.3, abs_tol=1e-6)
+
+
+def test_server_and_local_simple_trial_helpers_match():
+    local_scores, local_infos = local_reward_manager._apply_simple_trial_bonus(
+        _sample_scores(),
+        _sample_extra_infos(),
+        _cfg_simple(),
+    )
+    server_scores, server_infos = server_reward_manager._apply_simple_trial_bonus(
+        _sample_scores(),
+        _sample_extra_infos(),
+        _cfg_simple(),
+    )
+
+    assert local_scores == server_scores
+    assert local_infos == server_infos
+
+
+def test_reward_manager_v2_simple_skips_group_bonus_and_uses_simple_trial(monkeypatch):
+    canned_results = [
+        (0, {"reward": 1.1, "second_reward": 0.0}, 2, "seq-0", {
+            "correct": True,
+            "subtask_ratio": 0.2,
+            "trial_ratio": 0.7,
+            "parallel_ratio": 0.6,
+            "acceleration_ratio": 0.1,
+        }),
+        (1, {"reward": -0.9, "second_reward": 0.0}, 3, "seq-1", {
+            "correct": False,
+            "subtask_ratio": 0.8,
+            "trial_ratio": 0.9,
+            "parallel_ratio": 0.9,
+            "acceleration_ratio": 0.4,
+        }),
+    ]
+
+    def fake_process_item(args):
+        return canned_results[args[0]]
+
+    monkeypatch.setattr(local_reward_manager, "process_item", fake_process_item)
+
+    class FakeItem:
+        def __init__(self):
+            self.batch = {}
+            self.non_tensor_batch = {}
+
+    class FakeData:
+        def __init__(self):
+            self.batch = {
+                "responses": torch.tensor([[1, 2, 0], [3, 4, 5]], dtype=torch.long),
+            }
+            self.non_tensor_batch = {
+                "uid": np.array(["g1", "g1"], dtype=object),
+            }
+            self._items = [FakeItem(), FakeItem()]
+
+        def __len__(self):
+            return len(self._items)
+
+        def __getitem__(self, idx):
+            return self._items[idx]
+
+    cfg = {
+        "version": "v2_simple",
+        "trial_ratio_simple_alpha": 0.5,
+        "trial_ratio_simple_clip_max": 0.3,
+        # These must be ignored in v2_simple mode.
+        "subtask_beta": 10.0,
+        "trial_beta": 10.0,
+        "parallel_ratio_beta": 10.0,
+        "latency_alpha": 10.0,
+    }
+    manager = local_reward_manager.RewardManager(tokenizer=None, num_examine=0, config=cfg)
+    data = FakeData()
+    result = manager(data, return_dict=True)
+
+    reward_tensor = result["reward_tensor"]["main_reward_tensor"]
+    extra_info = result["reward_extra_info"]
+
+    expected_bonus_correct = 0.5 * 0.3
+
+    assert reward_tensor.shape == torch.Size([2, 3])
+    assert torch.allclose(reward_tensor[0], torch.tensor([0.0, 1.1 + expected_bonus_correct, 0.0]))
+    assert torch.allclose(reward_tensor[1], torch.tensor([0.0, 0.0, -0.9]))
+    assert extra_info["simple_trial_reward"] == [pytest.approx(expected_bonus_correct), pytest.approx(0.0)]
+    assert "parallel_rewardv2_bonus" not in extra_info
 
 
 def test_reward_manager_writes_final_reward_to_last_valid_token(monkeypatch):
