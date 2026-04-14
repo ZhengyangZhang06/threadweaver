@@ -117,29 +117,29 @@ Use `eval_pause_sweep.sh` to evaluate one checkpoint across multiple
 ```bash
 cd threadweaver/threadweaver_sft
 
-./eval_pause_sweep.sh ckpts/Q3-8B-131072-SFT \
-  --data-type data/mult-10k-par_pq/train.parquet \
+./eval_pause_sweep.sh /path/to/checkpoint \
+  --data-type /path/to/dataset (Point to the parquet file) \
   -n 32 \
   --bfloat16 \
   --verbose 2
 ```
 
+Please download the evaluation dataset from [here](https://huggingface.co/datasets/parallel-reasoner/Test/tree/main) (There is a file called aime24-test.parquet)and provide the path via `--data-type` (or `-d`).
+
 ### Required input
 
 - `<checkpoint_path>` (first positional arg): checkpoint/model path to evaluate.
-- `--data-type` / `-d`: parquet path (or dataset key). Resolution order is:
-  1. CLI `--data-type`
-  2. `DATA_TYPE` env var
-  3. interactive prompt
+- `--data-type` / `-d`: parquet path (or dataset key). This is required and must be passed via CLI args.
 
 ### Optional controls
 
-- `-n`, `--n-samples` (or `N_SAMPLES` env var; default `1`)
+- `-n`, `--n-samples` (default `1`)
 - `--bfloat16`
-- `--verbose <level>` (or `VERBOSE_LEVEL` env var)
-- `MAX_CONTEXT_LENGTH` env var (default `40960`)
-- `TEMPLATE_TYPE` env var (default `model`)
-- any extra args are forwarded to `src/simple_eval_pause.py`
+- `--verbose <level>`
+- default values in the wrapper:
+  - `max-context-length=40960`
+  - `template-type=model`
+- any extra terminal args are forwarded to `src/simple_eval_pause.py` (and can override defaults)
 
 The sweep runs these pause limits:
 `0, 2048, 4096, 8192, 16384, 24576, 32768, 40960`.
