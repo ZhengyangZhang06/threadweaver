@@ -143,7 +143,10 @@ def train():
         data_collator=collator,
     )
 
-    trainer.train()
+    if args.resume_from_checkpoint:
+        logging.info(f"Resuming trainer state from checkpoint: {args.resume_from_checkpoint}")
+
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     trainer.save_model(output_dir=args.output_dir)
     if trainer.is_local_process_zero():
