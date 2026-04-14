@@ -109,3 +109,46 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 ./train.sh --dataset_dir /path/to/train.parquet
 
 Model artifacts are written to your `--output_dir` (or `OUTPUT_DIR` env var), and by default include model/tokenizer outputs saved by the trainer.
 
+## 9. Evaluation (pause-limit sweep)
+
+Use `eval_pause_sweep.sh` to evaluate one checkpoint across multiple
+`num_tokens_in_the_longest_thread` pause limits and generate an aggregated report.
+
+```bash
+cd threadweaver/threadweaver_sft
+
+./eval_pause_sweep.sh ckpts/Q3-8B-131072-SFT \
+  --data-type data/mult-10k-par_pq/train.parquet \
+  -n 32 \
+  --bfloat16 \
+  --verbose 2
+```
+
+### Required input
+
+- `<checkpoint_path>` (first positional arg): checkpoint/model path to evaluate.
+- `--data-type` / `-d`: parquet path (or dataset key). Resolution order is:
+  1. CLI `--data-type`
+  2. `DATA_TYPE` env var
+  3. interactive prompt
+
+### Optional controls
+
+- `-n`, `--n-samples` (or `N_SAMPLES` env var; default `1`)
+- `--bfloat16`
+- `--verbose <level>` (or `VERBOSE_LEVEL` env var)
+- `MAX_CONTEXT_LENGTH` env var (default `40960`)
+- `TEMPLATE_TYPE` env var (default `model`)
+- any extra args are forwarded to `src/simple_eval_pause.py`
+
+The sweep runs these pause limits:
+`0, 2048, 4096, 8192, 16384, 24576, 32768, 40960`.
+
+### Outputs
+
+Outputs are written under `<checkpoint_dir>/eval_pause_outputs/`, including:
+
+- per-run metrics JSONs: `eval_pause_outputs/<run_name>/*_metrics.json`
+- per-run markdown report: `eval_pause_outputs/<run_name>/*_report.md`
+- aggregated CSV: `eval_pause_outputs/pause_sweep_report.csv`
+- aggregated markdown report: `eval_pause_outputs/pause_sweep_report.md`
